@@ -459,6 +459,15 @@ app.post('/create-chat', async (req, res) => {
     if (!chatName) {
         return res.status(400).json({ error: 'Chat name is required' });
     }
+    // Moderation: Check if creator is banned
+    if (await isUserBanned(creatorId)) {
+        return res.status(403).json({ error: 'You are banned from creating chats.' });
+    }
+    // Moderation: Check for bad words in chat name
+    if (containsBadWord(chatName)) {
+        await banUser(creatorId, 'Inappropriate chat name');
+        return res.status(400).json({ error: 'Chat name contains inappropriate language. You have been banned for 24 hours.' });
+    }
 
     const chatId = generateUniqueId();
     const chat = {
@@ -557,6 +566,14 @@ app.post('/register-user', async (req, res) => {
     if (!displayName) {
         return res.status(400).json({ error: 'Name is required' })
     }
+    // Moderation: Check for bad words in display name
+    if (containsBadWord(displayName)) {
+        return res.status(400).json({ error: 'Display name contains inappropriate language. Please choose another name.' })
+    }
+    // Moderation: If userId is provided, check if user is banned
+    if (userId && await isUserBanned(userId)) {
+        return res.status(403).json({ error: 'You are banned from registering.' })
+    }
 
     const newUserId = userId || uuidv4()
     
@@ -619,7 +636,9 @@ app.get('/user/:userId', async (req, res) => {
             code: user.code || null,
             secretWord: user.secretWord || null,
             profilePic: user.profilePic || null,
-            formatting: user.formatting || null
+            formatting: user.formatting || null,
+            bannedUntil: user.bannedUntil || null,
+            banReason: user.banReason || null
         })
     } catch (error) {
         console.error('Error fetching user:', error)
@@ -701,6 +720,14 @@ app.post('/user/:userId/update-name', async (req, res) => {
     if (!name) {
         return res.status(400).json({ error: 'Name is required' });
     }
+    // Moderation: Check for bad words in new name
+    if (containsBadWord(name)) {
+        return res.status(400).json({ error: 'Name contains inappropriate language. Please choose another name.' });
+    }
+    // Moderation: Check if user is banned
+    if (await isUserBanned(userId)) {
+        return res.status(403).json({ error: 'You are banned from updating your name.' });
+    }
     try {
         const result = await db.collection('users').updateOne(
             { id: userId },
@@ -759,11 +786,25 @@ wss.on('connection', async (ws) => {
             const data = JSON.parse(message);
             console.log('Received WebSocket message:', data.type);
 
+            // Moderation: Check ban on every message
+            if (data.userId && await isUserBanned(data.userId)) {
+                ws.send(JSON.stringify({ type: 'banned', reason: 'You are banned.', bannedUntil: (await db.collection('users').findOne({ id: data.userId })).bannedUntil }));
+                ws.close();
+                return;
+            }
+
             if (data.type === 'join') {
                 chatID = data.chatID;
                 userId = data.userId;
                 ws.chatID = chatID;
                 ws.userId = userId;
+
+                // Moderation: Check ban on join
+                if (await isUserBanned(userId)) {
+                    ws.send(JSON.stringify({ type: 'banned', reason: 'You are banned.', bannedUntil: (await db.collection('users').findOne({ id: userId })).bannedUntil }));
+                    ws.close();
+                    return;
+                }
 
                 const isTrial = data.trial === true;
                 console.log(`User ${userId} joining chat ${chatID}${isTrial ? ' (trial)' : ''}`);
@@ -797,6 +838,13 @@ wss.on('connection', async (ws) => {
                     }));
                 }
             } else if (data.type === 'message') {
+                // Moderation: Check for bad words in message
+                if (containsBadWord(data.content)) {
+                    await banUser(userId, 'Inappropriate message content');
+                    ws.send(JSON.stringify({ type: 'banned', reason: 'Inappropriate message content. You have been banned for 24 hours.' }));
+                    ws.close();
+                    return;
+                }
                 // Add message to MongoDB
                 const message = {
                     id: data.id || generateUniqueId(),
@@ -1372,6 +1420,15 @@ app.post('/api/chats/:chatId/rename', async (req, res) => {
     if (!userId || !newName) {
         return res.status(400).json({ error: 'userId and newName are required' });
     }
+    // Moderation: Check if user is banned
+    if (await isUserBanned(userId)) {
+        return res.status(403).json({ error: 'You are banned from renaming chats.' });
+    }
+    // Moderation: Check for bad words in new chat name
+    if (containsBadWord(newName)) {
+        await banUser(userId, 'Inappropriate chat name (rename)');
+        return res.status(400).json({ error: 'Chat name contains inappropriate language. You have been banned for 24 hours.' });
+    }
     try {
         const chat = await db.collection('chats').findOne({ id: chatId });
         if (!chat) {
@@ -1452,6 +1509,15 @@ app.post('/create-group-chat', async (req, res) => {
     if (!name || !members || members.length === 0) {
         return res.status(400).json({ error: 'Missing chat name or members' });
     }
+    // Moderation: Check if creator is banned
+    if (await isUserBanned(creatorId)) {
+        return res.status(403).json({ error: 'You are banned from creating chats.' });
+    }
+    // Moderation: Check for bad words in chat name
+    if (containsBadWord(name)) {
+        await banUser(creatorId, 'Inappropriate chat name');
+        return res.status(400).json({ error: 'Chat name contains inappropriate language. You have been banned for 24 hours.' });
+    }
 
     try {
         const newChat = {
@@ -1478,6 +1544,39 @@ app.post('/create-group-chat', async (req, res) => {
         res.status(500).json({ error: 'Failed to create group chat' });
     }
 });
+
+// --- Moderation System ---
+// List of bad words (expand as needed)
+const BAD_WORDS = [
+    'badword1', 'badword2', 'badword3', 'fuck', 'shit', 'bitch', 'asshole', 'cunt', 'nigger', 'faggot', 'dick', 'pussy', 'cock', 'slut', 'whore', 'bastard', 'damn', 'crap', 'twat', 'wank', 'bollock', 'bugger', 'arse', 'prick', 'spastic', 'retard', 'wanker', 'motherfucker', 'douche', 'cum', 'jizz', 'tit', 'boob', 'boobs', 'penis', 'vagina', 'anus', 'fag', 'dyke', 'homo', 'queer', 'rape', 'rapist', 'molest', 'molester', 'pedo', 'paedo', 'pedophile', 'paedophile', 'nazi', 'hitler', 'heil', 'kkk', 'klan', 'coon', 'chink', 'gook', 'spic', 'wetback', 'beaner', 'kike', 'heeb', 'jap', 'gypsy', 'tranny', 'shemale', 'tits', 'balls', 'testicle', 'scrotum', 'ejaculate', 'masturbate', 'orgasm', 'clit', 'clitoris', 'dildo', 'buttplug', 'butt plug', 'butt-plug', 'fisting', 'rimjob', 'rim job', 'rim-job', 'blowjob', 'blow job', 'blow-job', 'handjob', 'hand job', 'hand-job', 'cocksucker', 'cock sucker', 'cock-sucker', 'mother fucker', 'mother-fucker', 'son of a bitch', 'son-of-a-bitch', 'ass', 'arsehole', 'shithead', 'shit head', 'shit-head', 'fuckface', 'fuck face', 'fuck-face', 'dickhead', 'dick head', 'dick-head', 'piss', 'pissed', 'pissing', 'piss off', 'piss-off', 'piss off', 'piss-off', 'bastard', 'bollocks', 'bugger', 'choad', 'crap', 'dammit', 'darn', 'frigger', 'goddamn', 'god damn', 'god-damn', 'hell', 'jerk', 'pussy', 'shit', 'shite', 'shitty', 'shitting', 'shitty', 'shat', 'shite', 'slut', 'son of a bitch', 'son-of-a-bitch', 'spunk', 'turd', 'twat', 'wank', 'wanker', 'whore'
+];
+
+function containsBadWord(text) {
+    if (!text) return false;
+    const lower = text.toLowerCase();
+    return BAD_WORDS.some(word => lower.includes(word));
+}
+
+async function banUser(userId, reason = 'Inappropriate content') {
+    const bannedUntil = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+    await db.collection('users').updateOne(
+        { id: userId },
+        { $set: { bannedUntil, banReason: reason } }
+    );
+    // Disconnect all sockets for this user
+    wss.clients.forEach((client) => {
+        if (client.userId === userId && client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ type: 'banned', reason, bannedUntil }));
+            client.close();
+        }
+    });
+}
+
+async function isUserBanned(userId) {
+    const user = await db.collection('users').findOne({ id: userId });
+    if (!user || !user.bannedUntil) return false;
+    return user.bannedUntil > Date.now();
+}
 
 // Connect to MongoDB and start the server
 const PORT = process.env.PORT || 3000;
