@@ -506,9 +506,13 @@
                 };
                 modalCancelBtn.onclick = () => {
                     createModalBg.classList.remove('active');
+                    createModalBg.style.display = 'none';
                 };
                 createModalBg.onclick = (e) => {
-                    if (e.target === createModalBg) createModalBg.classList.remove('active');
+                    if (e.target === createModalBg) {
+                        createModalBg.classList.remove('active');
+                        createModalBg.style.display = 'none';
+                    }
                 };
                 modalChatNameInput.addEventListener('keydown', function(e) {
                     if (e.key === 'Enter') modalCreateBtn.click();
@@ -715,15 +719,18 @@
                     })
                 });
 
+                if (response.status === 403) {
+                    // User is banned
+                    showBanPopup();
+                    return;
+                }
                 if (!response.ok) {
                     throw new Error('Failed to create chat');
                 }
 
                 const chat = await response.json();
-                
                 // Refresh the recent chats list
                 loadRecentChats();
-                
                 // Redirect to the new chat
                 window.location.href = `/chat.html?chatID=${chat.id}`;
             } catch (error) {
@@ -1224,6 +1231,45 @@
                 console.error('Failed to load users:', error);
                 membersList.innerHTML = '<p style="color:red">Could not load users.</p>';
             }
+        }
+
+        function showBanPopup() {
+            // Remove any existing ban popup
+            const oldPopup = document.getElementById('banPopup');
+            if (oldPopup) oldPopup.remove();
+            // Create overlay
+            const overlay = document.createElement('div');
+            overlay.id = 'banPopup';
+            overlay.style.position = 'fixed';
+            overlay.style.top = 0;
+            overlay.style.left = 0;
+            overlay.style.width = '100vw';
+            overlay.style.height = '100vh';
+            overlay.style.background = 'rgba(0,0,0,0.85)';
+            overlay.style.zIndex = 99999;
+            overlay.style.display = 'flex';
+            overlay.style.flexDirection = 'column';
+            overlay.style.justifyContent = 'center';
+            overlay.style.alignItems = 'center';
+            overlay.style.color = '#fff';
+            overlay.style.fontSize = '2rem';
+            overlay.style.fontFamily = 'Arial, sans-serif';
+            overlay.innerHTML = `<div style=\"background:#222;padding:2rem 3rem;border-radius:16px;box-shadow:0 4px 32px #000a;text-align:center;max-width:90vw;\">
+              <div style='font-size:2.2rem;margin-bottom:1rem;'>🚫 You have been banned for 24 hours</div>
+              <div style='font-size:1.1rem;margin-bottom:2rem;'>Reason: Inappropriate content.<br>Banned until: <b>24 hours from now</b></div>
+              <div style='font-size:1rem;color:#ccc;'>Click anywhere or press any key to close this window.</div>
+            </div>`;
+            document.body.appendChild(overlay);
+            // Handler to close window or redirect
+            function closeAndRedirect() {
+                overlay.remove();
+                window.close();
+                setTimeout(() => {
+                    window.location.href = 'about:blank';
+                }, 200);
+            }
+            overlay.addEventListener('click', closeAndRedirect);
+            window.addEventListener('keydown', closeAndRedirect, { once: true });
         }
     </script>
     <script src="/js/utils.js"></script>
