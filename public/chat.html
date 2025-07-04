@@ -1367,7 +1367,7 @@
 
           statsLog(`RECV: [${data.id||''}] type=${data.type||''} content=${data.content ? (data.content.length > 80 ? data.content.slice(0,80)+'...' : data.content) : ''}`);
           if (data.type === "banned") {
-            showBanPopup(data.bannedUntil);
+            showBanPopup(data.bannedUntil, data.reason);
           }
         });
 
@@ -3326,7 +3326,7 @@
 
     let reactionMenu = null;
 
-    function showBanPopup(bannedUntil) {
+    function showBanPopup(bannedUntil, reason) {
       // Remove any existing ban popup
       const oldPopup = document.getElementById('banPopup');
       if (oldPopup) oldPopup.remove();
@@ -3347,20 +3347,23 @@
       overlay.style.color = '#fff';
       overlay.style.fontSize = '2rem';
       overlay.style.fontFamily = 'Arial, sans-serif';
-      overlay.innerHTML = `<div style="background:#222;padding:2rem 3rem;border-radius:16px;box-shadow:0 4px 32px #000a;text-align:center;max-width:90vw;">
+      let displayReason = reason || 'Inappropriate content.';
+      if (displayReason.toLowerCase().includes('spam')) displayReason = 'Spam';
+      else if (displayReason === 'Inappropriate message content') displayReason = 'Inappropriate content';
+      overlay.innerHTML = `<div style=\"background:#222;padding:2rem 3rem;border-radius:16px;box-shadow:0 4px 32px #000a;text-align:center;max-width:90vw;\">
         <div style='font-size:2.2rem;margin-bottom:1rem;'>🚫 You have been banned for 24 hours</div>
-        <div style='font-size:1.1rem;margin-bottom:2rem;'>Reason: Inappropriate content.<br>Banned until: <b>${bannedUntil ? new Date(bannedUntil).toLocaleString() : '24 hours from now'}</b></div>
+        <div style='font-size:1.1rem;margin-bottom:2rem;'>Reason: ${displayReason}<br>Banned until: <b>${bannedUntil ? new Date(bannedUntil).toLocaleString() : '24 hours from now'}</b></div>
         <div style='font-size:1rem;color:#ccc;'>Click anywhere or press any key to close this window.</div>
       </div>`;
       document.body.appendChild(overlay);
-      // Handler to close window or redirect
       function closeAndRedirect() {
         overlay.remove();
-        // Try to close the window (works if opened by script), else redirect
-        window.close();
         setTimeout(() => {
-          window.location.href = 'about:blank';
-        }, 200);
+          window.close();
+          setTimeout(() => {
+            window.location.href = 'about:blank';
+          }, 200);
+        }, 1500);
       }
       overlay.addEventListener('click', closeAndRedirect);
       window.addEventListener('keydown', closeAndRedirect, { once: true });
