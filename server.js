@@ -211,9 +211,13 @@ const upload = multer({
 // Serve uploaded files from the correct directory
 app.use('/uploads', express.static(path.join(DATA_DIR, 'uploads')));
 
-// Serve welcome.html as the default landing page
-app.get('/', (req, res) => {
+// Serve welcome.html as the default landing page for both '/' and '/welcome.html'
+app.get(['/', '/welcome.html'], (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'welcome.html'));
+});
+// Optionally, explicitly serve index.html for '/index.html'
+app.get('/index.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // Get all chats
