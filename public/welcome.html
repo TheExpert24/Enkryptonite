@@ -288,6 +288,7 @@
     </div>
 
     <script>
+    document.addEventListener('DOMContentLoaded', function() {
         const profilePicContainer = document.getElementById('profilePicContainer');
         const profilePicInput = document.getElementById('profilePicInput');
         const nameInput = document.getElementById('nameInput');
@@ -419,6 +420,13 @@
                     })
                 });
                 
+                if (response.status === 403) {
+                    showBanMessage();
+                    loading.style.display = 'none';
+                    startBtn.disabled = false;
+                    return;
+                }
+                
                 if (!response.ok) {
                     const errorText = await response.text();
                     let errorMessage = 'Failed to register user.';
@@ -426,6 +434,12 @@
                     try {
                         const errorData = JSON.parse(errorText);
                         errorMessage = errorData.error || errorMessage;
+                        if (errorMessage.toLowerCase().includes('banned')) {
+                            showBanMessage();
+                            loading.style.display = 'none';
+                            startBtn.disabled = false;
+                            return;
+                        }
                     } catch (parseError) {
                         // If response is not JSON, check for specific error codes
                         if (response.status === 413) {
@@ -464,15 +478,13 @@
         });
 
         // Check if user is already logged in
-        document.addEventListener('DOMContentLoaded', () => {
-            const userId = localStorage.getItem('userId');
-            const userName = localStorage.getItem('userName');
-            
-            if (userId && userName) {
-                // User is already logged in, redirect to homepage
-                window.location.href = '/';
-            }
-        });
+        const userId = localStorage.getItem('userId');
+        const userName = localStorage.getItem('userName');
+        
+        if (userId && userName) {
+            // User is already logged in, redirect to homepage
+            window.location.href = '/';
+        }
 
         // Toggle sections
         showSignIn.onclick = (e) => { e.preventDefault(); registerSection.style.display='none'; signInSection.style.display='block'; };
@@ -493,11 +505,23 @@
             const code = signInCode.value.trim();
             signInError.textContent='';
             if(!dName || !code){ signInError.textContent='Enter name and secret word'; return; }
-
             try {
                 const res = await fetch(`/api/find-user?displayName=${encodeURIComponent(dName)}&code=${encodeURIComponent(code)}`);
                 if(!res.ok){ signInError.textContent='User not found or secret word incorrect'; return; }
                 const data = await res.json();
+                // Check if banned
+                if (data.userId) {
+                    try {
+                        const userRes = await fetch(`/user/${data.userId}`);
+                        if (userRes.ok) {
+                            const user = await userRes.json();
+                            if (user.bannedUntil && user.bannedUntil > Date.now()) {
+                                showBanMessageSignIn();
+                                return;
+                            }
+                        }
+                    } catch {}
+                }
                 localStorage.setItem('userId', data.userId);
                 localStorage.setItem('userName', data.name);
                 if(keepSignedInChk.checked){ localStorage.setItem('keepSignedIn','true'); }
@@ -506,6 +530,40 @@
                 signInError.textContent='Error signing in';
             }
         };
+
+        // Add this function to show a ban message and exit
+        function showBanMessageSignIn() {
+            signInError.innerHTML = `<span style='color:#dc3545;font-weight:bold;font-size:1.1em;'>🚫 You are banned for 24 hours.<br>Please try again later.</span>`;
+            setTimeout(() => {
+                window.close();
+            }, 1200);
+        }
+
+        // Add this function to show a ban message
+        function showBanMessage() {
+            errorMessage.innerHTML = `<span style='color:#dc3545;font-weight:bold;font-size:1.1em;'>🚫 You are banned for 24 hours.<br>Please try again later.</span>`;
+            startBtn.disabled = true;
+            setTimeout(() => {
+                window.close();
+            }, 1200);
+        }
+
+        // On page load, check if the userId in localStorage is banned and show the ban message if so
+        async function checkBanOnWelcome() {
+            const userId = localStorage.getItem('userId');
+            if (!userId) return;
+            try {
+                const res = await fetch(`/user/${userId}`);
+                if (res.ok) {
+                    const user = await res.json();
+                    if (user.bannedUntil && user.bannedUntil > Date.now()) {
+                        showBanMessage();
+                    }
+                }
+            } catch {}
+        }
+        checkBanOnWelcome();
+    });
     </script>
 </body>
 </html> 
