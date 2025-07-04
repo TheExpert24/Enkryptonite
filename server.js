@@ -211,10 +211,10 @@ const upload = multer({
 // Serve uploaded files from the correct directory
 app.use('/uploads', express.static(path.join(DATA_DIR, 'uploads')));
 
-// Serve welcome page
-app.get('/welcome', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'welcome.html'))
-})
+// Serve welcome.html as the default landing page
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'welcome.html'));
+});
 
 // Get all chats
 app.get('/chats', (req, res) => {
@@ -775,6 +775,29 @@ app.post('/user/:userId/formatting', async (req, res) => {
     }
 });
 
+// --- Spam Detection (in-memory, per user) ---
+const userMessageTimestamps = new Map(); // userId -> [timestamps]
+const userLastMessage = new Map(); // userId -> last message content
+
+function isSpam(userId, content) {
+    const now = Date.now();
+    // Track timestamps
+    if (!userMessageTimestamps.has(userId)) userMessageTimestamps.set(userId, []);
+    const timestamps = userMessageTimestamps.get(userId);
+    timestamps.push(now);
+    // Keep only last 10 seconds
+    while (timestamps.length && now - timestamps[0] > 10000) timestamps.shift();
+    // More than 5 messages in 10 seconds
+    if (timestamps.length > 5) return 'rate';
+    // Repeated identical message
+    const last = userLastMessage.get(userId);
+    userLastMessage.set(userId, content);
+    if (last && last === content) return 'repeat';
+    // Excessive length
+    if (content && content.length > 1000) return 'length';
+    return false;
+}
+
 // WebSocket connection handling
 wss.on('connection', async (ws) => {
     console.log('New WebSocket connection');
@@ -838,6 +861,40 @@ wss.on('connection', async (ws) => {
                     }));
                 }
             } else if (data.type === 'message') {
+                // Moderation: Check for spam
+                const spamType = isSpam(userId, data.content);
+                if (spamType) {
+                    let reason = 'Spam';
+                    // Delete all recent messages from this user in this chat (last 10 seconds)
+                    const now = Date.now();
+                    const currentChat = await db.collection('chats').findOne({ id: chatID });
+                    if (currentChat && Array.isArray(currentChat.messages)) {
+                        const spamMsgIds = currentChat.messages
+                            .filter(m => m.userId === userId && now - m.timestamp <= 10000)
+                            .map(m => m.id);
+                        if (spamMsgIds.length > 0) {
+                            await db.collection('chats').updateOne(
+                                { id: chatID },
+                                { $pull: { messages: { id: { $in: spamMsgIds } } } }
+                            );
+                            // Broadcast deletion to all clients
+                            wss.clients.forEach((client) => {
+                                if (client.readyState === WebSocket.OPEN && client.chatID === chatID) {
+                                    spamMsgIds.forEach(messageId => {
+                                        client.send(JSON.stringify({
+                                            type: 'message_deleted',
+                                            messageId
+                                        }));
+                                    });
+                                }
+                            });
+                        }
+                    }
+                    await banUser(userId, reason);
+                    ws.send(JSON.stringify({ type: 'banned', reason, bannedUntil: Date.now() + 24*60*60*1000 }));
+                    ws.close();
+                    return;
+                }
                 // Moderation: Check for bad words in message
                 if (containsBadWord(data.content)) {
                     await banUser(userId, 'Inappropriate message content');
