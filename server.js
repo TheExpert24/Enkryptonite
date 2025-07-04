@@ -152,6 +152,11 @@ function saveData() {
 // Load data when server starts
 loadData()
 
+// Redirect /welcome to /welcome.html (must be before static middleware)
+app.get('/welcome', (req, res) => {
+    res.redirect('/welcome.html');
+});
+
 app.use(express.static('public'))
 app.use(express.json())
 
