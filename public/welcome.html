@@ -460,7 +460,7 @@
                 }
                 
                 // Redirect to homepage
-                window.location.href = '/';
+                window.location.href = '/index.html';
                 
             } catch (error) {
                 console.error('Error registering user:', error);
@@ -476,15 +476,6 @@
                 startBtn.click();
             }
         });
-
-        // Check if user is already logged in
-        const userId = localStorage.getItem('userId');
-        const userName = localStorage.getItem('userName');
-        
-        if (userId && userName) {
-            // User is already logged in, redirect to homepage
-            window.location.href = '/';
-        }
 
         // Toggle sections
         showSignIn.onclick = (e) => { e.preventDefault(); registerSection.style.display='none'; signInSection.style.display='block'; };
@@ -525,7 +516,7 @@
                 localStorage.setItem('userId', data.userId);
                 localStorage.setItem('userName', data.name);
                 if(keepSignedInChk.checked){ localStorage.setItem('keepSignedIn','true'); }
-                window.location.href = '/';
+                window.location.href = '/index.html';
             } catch (err) {
                 signInError.textContent='Error signing in';
             }
