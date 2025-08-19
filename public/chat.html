@@ -716,13 +716,18 @@
     let ws;
     let e2eeMessenger;
     let recipientPublicKey = null;
+    let userPublicKeys = new Map(); // Store all user public keys
 
     // Initialize E2EE
     async function initializeE2EE() {
       try {
+        console.log('Creating E2EEMessenger instance...');
         e2eeMessenger = new E2EEMessenger();
+        console.log('Initializing E2EE system...');
         await e2eeMessenger.initialize();
+        console.log('Getting public key...');
         const publicKey = await e2eeMessenger.getPublicKey();
+        console.log('Public key obtained:', publicKey.substring(0, 20) + '...');
         
         // Store public key in localStorage
         localStorage.setItem('publicKey', publicKey);
@@ -792,7 +797,7 @@
     async function loadChatData() {
       try {
         console.log('Attempting to load chat data for ID:', chatID);
-        const response = await fetch(`/api/chat/${chatID}`);
+        const response = await fetch(`/api/chat/${chatID}?userId=${userId}`);
         console.log('Response status:', response.status);
         
         if (!response.ok) {
@@ -923,22 +928,7 @@
             window.removeEventListener('beforeunload', beforeUnloadHandler);
           };
 
-          // Automatically start chat (WebSocket, E2EE) if not already started
-          if (!window._chatStarted) {
-            window._chatStarted = true;
-            if (currentUserName) {
-              startChat(currentUserName);
-            } else {
-              // Fetch user name then start chat
-              fetch(`/user/${userId}`)
-                .then(res => res.json())
-                .then(d => {
-                  currentUserName = d.name;
-                  startChat(currentUserName);
-                })
-                .catch(() => startChat('Guest'));
-            }
-          }
+          // Start chat will be handled by the main flow
         } else {
           // Hide join button if user is already in chat or is the creator
           joinButton.style.display = 'none';
@@ -950,24 +940,7 @@
           const old = document.getElementById('trialBanner');
           if (old) old.remove();
 
-          // Automatically start chat UI for members and creators (was removed earlier)
-          if (!window._chatStarted) {
-            window._chatStarted = true;
-            if (currentUserName) {
-              startChat(currentUserName);
-            } else {
-              // Fetch user name then start
-              fetch(`/user/${userId}`)
-                .then(res => res.json())
-                .then(d => {
-                  currentUserName = d.name;
-                  startChat(currentUserName);
-                })
-                .catch(() => {
-                  startChat('Me');
-                });
-            }
-          }
+          // Chat will be started by main DOMContentLoaded handler
         }
 
         // --- Render chat members list ---
@@ -993,22 +966,8 @@
         }
         // --- End render chat members list ---
         
-        // Update chat messages if we have them
-        if (data.messages && data.messages.length > 0) {
-          window._allMessages = data.messages.slice();
-          console.log('Rendering', data.messages.length, 'messages');
-          const chatBox = document.getElementById('chatBox');
-          chatBox.innerHTML = '';
-          
-          for (const message of data.messages) {
-            await showMessage(message);
-          }
-          
-          // Scroll to bottom after loading messages
-          chatBox.scrollTop = chatBox.scrollHeight;
-        } else {
-          console.log('No messages to display');
-        }
+        // Messages will be loaded via WebSocket history
+        console.log('Chat data loaded, waiting for WebSocket history...');
       } catch (error) {
         console.error('Error loading chat:', error);
         document.getElementById('chatTitle').textContent = 'Error loading chat';
@@ -1144,9 +1103,27 @@
         }
       });
 
-      // NEW: fetch chat details immediately so UI is not stuck on "Loading..."
+      // Load chat data and start chat if user exists
       try {
         await loadChatData();
+        
+        // Start chat only once here
+        if (userId && !window._chatStarted) {
+          window._chatStarted = true;
+          try {
+            const response = await fetch(`/user/${userId}`);
+            if (response.ok) {
+              const userData = await response.json();
+              currentUserName = userData.name;
+              await startChat(currentUserName);
+            } else {
+              await startChat('Guest');
+            }
+          } catch (error) {
+            console.error('Error fetching user data:', error);
+            await startChat('Guest');
+          }
+        }
       } catch (err) {
         console.error('Initial chat data load failed:', err);
       }
@@ -1155,14 +1132,16 @@
     // Function to start the chat
     async function startChat(name) {
       // Prevent multiple WebSocket/E2EE initializations
-      if (window._chatStarted && window.ws && window.ws.readyState === WebSocket.OPEN) {
-        console.warn('Chat already started, skipping duplicate startChat call');
+      if (window.ws && window.ws.readyState === WebSocket.OPEN) {
+        console.warn('WebSocket already connected, skipping duplicate startChat call');
         return;
       }
       currentUserName = name;
       try {
-        // Initialize E2EE first
+        // Initialize E2EE first and ensure it's fully ready
+        console.log('Initializing E2EE system...');
         await initializeE2EE();
+        console.log('E2EE system initialized successfully');
         
         // Then initialize user
         const userData = await initializeUser(name);
@@ -1198,17 +1177,22 @@
         // Load user formatting preferences after user is initialized
         await loadUserFormatting();
 
+        // Small delay to ensure E2EE is fully ready
+        await new Promise(resolve => setTimeout(resolve, 100));
+
         // Initialize WebSocket connection with protocol matching the page
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${wsProtocol}//${window.location.host}`;
         console.log('Connecting to WebSocket at:', wsUrl);
+        console.log('E2EE messenger ready:', !!e2eeMessenger);
         ws = new WebSocket(wsUrl);
 
-        ws.addEventListener("open", () => {
+        ws.addEventListener("open", async () => {
           console.log("WebSocket connection established");
           // Send join message with public key
-          if (e2eeMessenger) {
-            e2eeMessenger.getPublicKey().then(publicKey => {
+          try {
+            if (e2eeMessenger) {
+              const publicKey = await e2eeMessenger.getPublicKey();
               console.log('Sending public key with join message:', publicKey.substring(0, 20) + '...');
               ws.send(JSON.stringify({
                 type: "join",
@@ -1217,18 +1201,18 @@
                 publicKey: publicKey,
                 trial: !window.isUserMember
               }));
-            }).catch(error => {
-              console.error('Failed to get public key:', error);
-              // Send join message without public key
+            } else {
+              console.warn('E2EE not initialized, joining without public key');
               ws.send(JSON.stringify({
                 type: "join",
                 chatID: chatID,
                 userId: userId,
                 trial: !window.isUserMember
               }));
-            });
-          } else {
-            console.warn('E2EE not initialized, joining without public key');
+            }
+          } catch (error) {
+            console.error('Failed to get public key:', error);
+            // Send join message without public key
             ws.send(JSON.stringify({
               type: "join",
               chatID: chatID,
@@ -1241,6 +1225,30 @@
         ws.addEventListener("message", async (event) => {
           const data = JSON.parse(event.data);
           console.log('Received WebSocket message:', data.type);
+          
+          // Handle public key exchange
+          if (data.type === "user_joined" && data.publicKey && data.userId !== userId) {
+            console.log('Received public key from user:', data.userId, 'Key:', data.publicKey.substring(0, 20) + '...');
+            userPublicKeys.set(data.userId, data.publicKey);
+            // For backward compatibility, set recipientPublicKey to the latest user
+            recipientPublicKey = data.publicKey;
+            console.log('Updated userPublicKeys, total keys:', userPublicKeys.size);
+            return;
+          }
+          
+          // Handle existing users' public keys when joining
+          if (data.type === "existing_users" && data.users) {
+            console.log('Received existing users data:', data.users.length, 'users');
+            data.users.forEach(user => {
+              if (user.userId !== userId && user.publicKey) {
+                console.log('Adding public key for existing user:', user.userId, 'Key:', user.publicKey.substring(0, 20) + '...');
+                userPublicKeys.set(user.userId, user.publicKey);
+                recipientPublicKey = user.publicKey; // Set to any available key
+              }
+            });
+            console.log('Total public keys after existing users:', userPublicKeys.size);
+            return;
+          }
           
           if (data.type === "history") {
             // Update chat title
@@ -1257,7 +1265,6 @@
             
             // Show message history
             if (data.messages && data.messages.length > 0) {
-                window._allMessages = data.messages.slice();
                 console.log('Displaying', data.messages.length, 'messages from history');
                 for (const message of data.messages) {
                     // Handle encrypted messages
@@ -1289,10 +1296,18 @@
                 console.log('No messages in history');
             }
           } else if (data.type === "message") {
-            window._allMessages = window._allMessages || [];
-            window._allMessages.push(data.message);
-            // Only show messages from other users
+            // Only show messages from other users (avoid showing our own messages twice)
             if (data.message.userId !== userId) {
+                // Decrypt message if encrypted
+                if (data.message.encrypted && e2eeMessenger) {
+                    try {
+                        data.message.content = await e2eeMessenger.decryptMessage(data.message.encrypted);
+                        console.log('Message decrypted successfully');
+                    } catch (error) {
+                        console.error('Failed to decrypt message:', error);
+                        data.message.content = '[Encrypted Message - Cannot Decrypt]';
+                    }
+                }
                 await showMessage(data.message);
                 // Scroll to bottom for new messages
                 const chatBox = document.getElementById("chatBox");
@@ -1434,15 +1449,42 @@
               };
               await showMessage(localMsg);
 
-              // Send message through WebSocket
-              ws.send(JSON.stringify({
+              // Encrypt message if E2EE is available and we have recipient key
+              let messageToSend = {
                 type: "message",
                 id: messageId,
                 content: content,
                 sender: currentUserName,
                 userId: userId,
                 imageUrl: imageUrl
-              }));
+              };
+
+              // Encrypt message if E2EE is available (use any available public key)
+              if (e2eeMessenger && content) {
+                const availableKey = recipientPublicKey || (userPublicKeys.size > 0 ? Array.from(userPublicKeys.values())[0] : null);
+                console.log('Encryption check - E2EE available:', !!e2eeMessenger, 'Content:', !!content, 'Available key:', !!availableKey);
+                console.log('UserPublicKeys size:', userPublicKeys.size, 'RecipientPublicKey:', !!recipientPublicKey);
+                if (availableKey) {
+                  try {
+                    const encrypted = await e2eeMessenger.encryptMessage(content, availableKey);
+                    messageToSend.encrypted = encrypted;
+                    messageToSend.content = '[Encrypted]';
+                    // Store plain text for our own messages
+                    const stored = JSON.parse(localStorage.getItem('sentPlain') || '{}');
+                    stored[messageId] = content;
+                    localStorage.setItem('sentPlain', JSON.stringify(stored));
+                    console.log('Message encrypted successfully');
+                  } catch (error) {
+                    console.warn('Encryption failed, sending plain text:', error);
+                  }
+                } else {
+                  console.log('No public keys available, sending plain text');
+                  console.log('Available keys in userPublicKeys:', Array.from(userPublicKeys.keys()));
+                }
+              }
+
+              // Send message through WebSocket
+              ws.send(JSON.stringify(messageToSend));
 
               // Stats logging
               statsLog(`SEND: [${messageId}] ${content}`);
@@ -1796,11 +1838,16 @@
 
     // Update showMessage to display avatar next to sender's name
     async function showMessage(message) {
+      // Prevent duplicate messages
+      if (document.querySelector(`[data-message-id="${message.id}"]`)) {
+        return;
+      }
+      
       const chatBox = document.getElementById('chatBox');
       const messageDiv = document.createElement('div');
       messageDiv.className = 'message';
       messageDiv.dataset.messageId = message.id;
-      messageDiv.dataset.userId = message.userId; // <-- Add this line
+      messageDiv.dataset.userId = message.userId;
 
       const bodyDiv = document.createElement('div');
       bodyDiv.className = 'message-body';
@@ -2475,9 +2522,16 @@
             
             // Clear all cached user info to force fresh fetches
             Object.keys(userInfoCache).forEach(key => delete userInfoCache[key]);
+            Object.keys(userInfoByIdCache).forEach(key => delete userInfoByIdCache[key]);
             
-            // Reload all chat messages to update avatars
-            await loadChatData();
+            // Update avatars without reloading chat
+            document.querySelectorAll('.avatar-circle').forEach(avatar => {
+              const messageEl = avatar.closest('.message');
+              if (messageEl && messageEl.dataset.userId === userId) {
+                const initials = getInitials(currentUserName);
+                setAvatarWithRetry(avatar, currentUserProfilePic + '?t=' + lastUploadTime, initials);
+              }
+            });
             
             alert('Profile picture updated successfully!');
           } else {
