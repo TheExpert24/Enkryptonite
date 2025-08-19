@@ -497,24 +497,20 @@
             signInError.textContent='';
             if(!dName || !code){ signInError.textContent='Enter name and secret word'; return; }
             try {
-                const res = await fetch(`/api/find-user?displayName=${encodeURIComponent(dName)}&code=${encodeURIComponent(code)}`);
-                if(!res.ok){ signInError.textContent='User not found or secret word incorrect'; return; }
-                const data = await res.json();
-                // Check if banned
-                if (data.userId) {
-                    try {
-                        const userRes = await fetch(`/user/${data.userId}`);
-                        if (userRes.ok) {
-                            const user = await userRes.json();
-                            if (user.bannedUntil && user.bannedUntil > Date.now()) {
-                                showBanMessageSignIn();
-                                return;
-                            }
-                        }
-                    } catch {}
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ displayName: dName, secretWord: code })
+                });
+                if(!res.ok){ 
+                    if(res.status === 401) signInError.textContent='Invalid credentials';
+                    else signInError.textContent='Login failed';
+                    return; 
                 }
+                const data = await res.json();
                 localStorage.setItem('userId', data.userId);
                 localStorage.setItem('userName', data.name);
+                localStorage.setItem('sessionToken', data.sessionToken);
                 if(keepSignedInChk.checked){ localStorage.setItem('keepSignedIn','true'); }
                 window.location.href = '/index.html';
             } catch (err) {
