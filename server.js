@@ -14,6 +14,35 @@ require('dotenv').config()
 
 const app = express()
 
+// Rate limiting
+const rateLimitMap = new Map();
+function rateLimit(maxRequests = 10, windowMs = 60000) {
+    return (req, res, next) => {
+        const key = req.ip + req.path;
+        const now = Date.now();
+        
+        if (!rateLimitMap.has(key)) {
+            rateLimitMap.set(key, { count: 1, resetTime: now + windowMs });
+            return next();
+        }
+        
+        const limit = rateLimitMap.get(key);
+        
+        if (now > limit.resetTime) {
+            limit.count = 1;
+            limit.resetTime = now + windowMs;
+            return next();
+        }
+        
+        if (limit.count >= maxRequests) {
+            return res.status(429).json({ error: 'Too many requests' });
+        }
+        
+        limit.count++;
+        next();
+    };
+}
+
 // Create server based on environment
 let server;
 if (process.env.NODE_ENV === 'production') {
@@ -570,7 +599,7 @@ app.get('/api/search-chats', async (req, res) => {
 loadExistingChats();
 
 // Add new endpoints for user management
-app.post('/register-user', async (req, res) => {
+app.post('/register-user', rateLimit(3, 300000), async (req, res) => {
     const { displayName, userId, profilePic } = req.body
     if (!displayName) {
         return res.status(400).json({ error: 'Name is required' })
@@ -639,11 +668,10 @@ app.get('/user/:userId', async (req, res) => {
         
         res.json({ 
             userId: user.id, 
-            name: user.name, // Display name for messages
-            fullName: user.fullName || user.name, // Full name with code for profiles
+            name: user.name,
+            fullName: user.fullName || user.name,
             displayName: user.displayName || user.name,
             code: user.code || null,
-            secretWord: user.secretWord || null,
             profilePic: user.profilePic || null,
             formatting: user.formatting || null,
             bannedUntil: user.bannedUntil || null,
@@ -786,7 +814,7 @@ app.post('/user/:userId/formatting', async (req, res) => {
 
 // --- Spam Detection (in-memory, per user) ---
 const userMessageTimestamps = new Map(); // userId -> [timestamps]
-const userLastMessage = new Map(); // userId -> last message content
+const userRecentMessages = new Map(); // userId -> [recent messages]
 
 function isSpam(userId, content) {
     const now = Date.now();
@@ -794,16 +822,24 @@ function isSpam(userId, content) {
     if (!userMessageTimestamps.has(userId)) userMessageTimestamps.set(userId, []);
     const timestamps = userMessageTimestamps.get(userId);
     timestamps.push(now);
-    // Keep only last 10 seconds
-    while (timestamps.length && now - timestamps[0] > 10000) timestamps.shift();
-    // More than 5 messages in 10 seconds
-    if (timestamps.length > 5) return 'rate';
-    // Repeated identical message
-    const last = userLastMessage.get(userId);
-    userLastMessage.set(userId, content);
-    if (last && last === content) return 'repeat';
+    // Keep only last 30 seconds
+    while (timestamps.length && now - timestamps[0] > 30000) timestamps.shift();
+    // More than 15 messages in 30 seconds
+    if (timestamps.length > 15) return 'rate';
+    
+    // Track recent messages for repeat detection
+    if (!userRecentMessages.has(userId)) userRecentMessages.set(userId, []);
+    const recentMessages = userRecentMessages.get(userId);
+    // Keep only last 10 messages
+    if (recentMessages.length >= 10) recentMessages.shift();
+    
+    // Check for repeated identical messages (5+ times in recent history)
+    const duplicateCount = recentMessages.filter(msg => msg === content).length;
+    recentMessages.push(content);
+    if (duplicateCount >= 4) return 'repeat';
+    
     // Excessive length
-    if (content && content.length > 1000) return 'length';
+    if (content && content.length > 2000) return 'length';
     return false;
 }
 
@@ -830,6 +866,8 @@ wss.on('connection', async (ws) => {
                 userId = data.userId;
                 ws.chatID = chatID;
                 ws.userId = userId;
+                ws.publicKey = data.publicKey;
+                console.log(`User ${userId} joining chat ${chatID} with public key:`, data.publicKey ? 'YES' : 'NO');
 
                 // Moderation: Check ban on join
                 if (await isUserBanned(userId)) {
@@ -840,6 +878,44 @@ wss.on('connection', async (ws) => {
 
                 const isTrial = data.trial === true;
                 console.log(`User ${userId} joining chat ${chatID}${isTrial ? ' (trial)' : ''}`);
+
+                // Send existing users' public keys to new joiner
+                if (data.publicKey) {
+                    console.log(`User ${userId} joined with public key, checking for existing users...`);
+                    const existingUsers = [];
+                    wss.clients.forEach((client) => {
+                        if (client !== ws && client.readyState === WebSocket.OPEN && client.chatID === chatID && client.publicKey) {
+                            existingUsers.push({
+                                userId: client.userId,
+                                publicKey: client.publicKey
+                            });
+                            console.log(`Found existing user ${client.userId} with public key`);
+                        }
+                    });
+                    
+                    console.log(`Sending ${existingUsers.length} existing users' public keys to new joiner`);
+                    if (existingUsers.length > 0) {
+                        ws.send(JSON.stringify({
+                            type: 'existing_users',
+                            users: existingUsers
+                        }));
+                    }
+                    
+                    // Broadcast new user's public key to existing users
+                    console.log(`Broadcasting new user ${userId}'s public key to existing users`);
+                    wss.clients.forEach((client) => {
+                        if (client !== ws && client.readyState === WebSocket.OPEN && client.chatID === chatID) {
+                            console.log(`Sending public key to existing user ${client.userId}`);
+                            client.send(JSON.stringify({
+                                type: 'user_joined',
+                                userId: userId,
+                                publicKey: data.publicKey
+                            }));
+                        }
+                    });
+                } else {
+                    console.log(`User ${userId} joined without public key - encryption not available`);
+                }
 
                 // Load chat from MongoDB
                 const chat = await db.collection('chats').findOne({ id: chatID });
@@ -915,15 +991,15 @@ wss.on('connection', async (ws) => {
                 const message = {
                     id: data.id || generateUniqueId(),
                     sender: data.sender,
-                    content: data.content,
+                    content: data.encrypted ? '[Encrypted]' : data.content,
                     timestamp: Date.now(),
-                    encrypted: data.encrypted,
+                    encrypted: data.encrypted || null,
                     userId: userId,
-                    imageUrl: data.imageUrl, // Add support for image URLs
-                    gifUrl: data.gifUrl, // Add support for GIF URLs
-                    fileUrl: data.fileUrl, // Add support for file URLs
-                    fileName: data.fileName, // Add support for file names
-                    parentId: data.parentId || null // Add support for threads
+                    imageUrl: data.imageUrl,
+                    gifUrl: data.gifUrl,
+                    fileUrl: data.fileUrl,
+                    fileName: data.fileName,
+                    parentId: data.parentId || null
                 };
 
                 // First get the current chat to preserve its name
@@ -1092,10 +1168,21 @@ wss.on('connection', async (ws) => {
 app.get('/api/chats/:chatId', async (req, res) => {
     try {
         const chatId = req.params.chatId;
+        const requestingUserId = req.query.userId;
         const chat = await db.collection('chats').findOne({ id: chatId });
         
         if (!chat) {
             return res.status(404).json({ error: 'Chat not found' });
+        }
+        
+        // Security check for private chats
+        if (chat.isPrivate) {
+            if (!requestingUserId) {
+                return res.status(401).json({ error: 'Authentication required' });
+            }
+            if (!chat.members || !chat.members.includes(requestingUserId)) {
+                return res.status(403).json({ error: 'Access denied' });
+            }
         }
         
         res.json({
@@ -1103,7 +1190,7 @@ app.get('/api/chats/:chatId', async (req, res) => {
             name: chat.name,
             messages: chat.messages || [],
             createdAt: chat.createdAt,
-            creatorId: chat.creatorId || null, // Include creator ID
+            creatorId: chat.creatorId || null,
             members: chat.members || []
         });
     } catch (error) {
@@ -1116,6 +1203,7 @@ app.get('/api/chats/:chatId', async (req, res) => {
 app.get('/api/chat/:chatId', async (req, res) => {
     try {
         const chatId = req.params.chatId;
+        const requestingUserId = req.query.userId;
         console.log('Fetching chat with ID:', chatId);
         
         const chat = await db.collection('chats').findOne({ id: chatId });
@@ -1124,6 +1212,16 @@ app.get('/api/chat/:chatId', async (req, res) => {
         if (!chat) {
             console.log('Chat not found in MongoDB');
             return res.status(404).json({ error: 'Chat not found' });
+        }
+        
+        // Security check for private chats
+        if (chat.isPrivate) {
+            if (!requestingUserId) {
+                return res.status(401).json({ error: 'Authentication required' });
+            }
+            if (!chat.members || !chat.members.includes(requestingUserId)) {
+                return res.status(403).json({ error: 'Access denied' });
+            }
         }
         
         const response = {
@@ -1399,13 +1497,41 @@ app.post('/upload-profile-pic/:userId', uploadProfilePic.single('profilePic'), a
 });
 
 
+// Secure login endpoint
+app.post('/api/login', rateLimit(5, 60000), async (req, res) => {
+    const { displayName, secretWord } = req.body;
+    if (!displayName || !secretWord) {
+        return res.status(400).json({ error: 'Display name and secret word are required' });
+    }
+    try {
+        const user = await db.collection('users').findOne({ displayName: displayName, secretWord: secretWord });
+        
+        if (!user) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+        
+        // Generate session token
+        const sessionToken = crypto.randomBytes(32).toString('hex');
+        
+        res.json({
+            userId: user.id,
+            sessionToken: sessionToken,
+            name: user.name,
+            fullName: user.fullName,
+            profilePic: user.profilePic || null
+        });
+    } catch (err) {
+        console.error('Login error:', err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
 app.get('/api/find-user', async (req, res) => {
     const { displayName, code } = req.query;
     if (!displayName || !code) {
         return res.status(400).json({ error: 'displayName and secret word are required' });
     }
     try {
-        // Find user by secret word
         const user = await db.collection('users').findOne({ displayName: displayName, secretWord: code });
         
         if (!user) {
@@ -1612,15 +1738,18 @@ app.post('/create-group-chat', async (req, res) => {
 });
 
 // --- Moderation System ---
-// List of bad words (expand as needed)
+// Improved bad words list - only actual offensive words
 const BAD_WORDS = [
-    'badword1', 'badword2', 'badword3', 'fuck','n!gger','n1gger','r@pe','shit', 'bitch', 'asshole', 'cunt', 'nigger', 'faggot', 'dick', 'pussy', 'cock', 'slut', 'whore', 'bastard', 'damn', 'crap', 'twat', 'wank', 'bollock', 'bugger', 'arse', 'prick', 'spastic', 'retard', 'wanker', 'motherfucker', 'douche', 'cum', 'jizz', 'tit', 'boob', 'boobs', 'penis', 'vagina', 'anus', 'fag', 'dyke', 'homo', 'queer', 'rape', 'rapist', 'molest', 'molester', 'pedo', 'paedo', 'pedophile', 'paedophile', 'nazi', 'hitler', 'heil', 'kkk', 'klan', 'coon', 'chink', 'gook', 'spic', 'wetback', 'beaner', 'kike', 'heeb', 'jap', 'gypsy', 'tranny', 'shemale', 'tits', 'balls', 'testicle', 'scrotum', 'ejaculate', 'masturbate', 'orgasm', 'clit', 'clitoris', 'dildo', 'buttplug', 'butt plug', 'butt-plug', 'fisting', 'rimjob', 'rim job', 'rim-job', 'blowjob', 'blow job', 'blow-job', 'handjob', 'hand job', 'hand-job', 'cocksucker', 'cock sucker', 'cock-sucker', 'mother fucker', 'mother-fucker', 'son of a bitch', 'son-of-a-bitch', 'ass', 'arsehole', 'shithead', 'shit head', 'shit-head', 'fuckface', 'fuck face', 'fuck-face', 'dickhead', 'dick head', 'dick-head', 'piss', 'pissed', 'pissing', 'piss off', 'piss-off', 'piss off', 'piss-off', 'bastard', 'bollocks', 'bugger', 'choad', 'crap', 'dammit', 'darn', 'frigger', 'goddamn', 'god damn', 'god-damn', 'hell', 'jerk', 'pussy', 'shit', 'shite', 'shitty', 'shitting', 'shitty', 'shat', 'shite', 'slut', 'son of a bitch', 'son-of-a-bitch', 'spunk', 'turd', 'twat', 'wank', 'wanker', 'whore'
+    'fuck', 'shit', 'bitch', 'asshole', 'cunt', 'nigger', 'faggot', 'pussy', 'cock', 'slut', 'whore', 'bastard', 'damn', 'crap', 'twat', 'wank', 'motherfucker', 'douche', 'cum', 'jizz', 'rape', 'rapist', 'molest', 'pedo', 'pedophile', 'nazi', 'hitler', 'kkk', 'kike', 'chink', 'gook', 'spic', 'wetback', 'beaner', 'jap', 'tranny', 'dickhead', 'shithead', 'fuckface', 'cocksucker', 'wanker'
 ];
 
 function containsBadWord(text) {
     if (!text) return false;
-    const lower = text.toLowerCase();
-    return BAD_WORDS.some(word => lower.includes(word));
+    const lower = text.toLowerCase().replace(/[^a-z]/g, '');
+    return BAD_WORDS.some(word => {
+        const cleanWord = word.replace(/[^a-z]/g, '');
+        return lower === cleanWord || (cleanWord.length > 3 && lower.includes(cleanWord));
+    });
 }
 
 async function banUser(userId, reason = 'Inappropriate content') {
