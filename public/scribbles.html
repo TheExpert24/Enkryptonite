@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scribbles</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; }
+    body { background: #000; overflow: hidden; font-family: system-ui, sans-serif; }
+    
+    .container { width: 100%; height: 100%; display: flex; flex-direction: column; position: relative; }
+    
+    .video-container { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; }
+    
+    video { width: 100%; height: 100%; object-fit: contain; display: block; }
+    
+    #remoteVideo { width: 100%; height: 100%; position: absolute; inset: 0; }
+    
+    #remoteVideo { display: none; }
+    
+    #localVideo { width: 100%; height: 100%; }
+    
+    #drawingCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      cursor: crosshair;
+      z-index: 5;
+    }
+    
+    #remoteAudio { display: none; }
+    
+    .controls {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+      opacity: 0;
+      transition: opacity 0.3s;
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 12px 16px;
+      border-radius: 8px;
+      align-items: center;
+    }
+    
+    .container:hover .controls { opacity: 1; }
+    
+    .color-picker {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    
+    .color-option {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      border: 2px solid transparent;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .color-option:hover { transform: scale(1.1); }
+    .color-option.active { border-color: #fff; }
+    
+    input[type="range"] {
+      width: 80px;
+      height: 4px;
+      cursor: pointer;
+    }
+    
+    input[type="text"] {
+      padding: 8px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.6);
+      color: white;
+      font-size: 14px;
+      display: none;
+    }
+    
+    button {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 4px;
+      background: rgba(72, 230, 207, 0.8);
+      color: #000;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    
+    button:hover { background: rgba(72, 230, 207, 1); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    button.tool-btn.active { background: #48e6cf; }
+    
+    .separator { width: 1px; height: 24px; background: rgba(255, 255, 255, 0.2); }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.0.7/dist/blazeface.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <div class="video-container">
+      <video id="remoteVideo" autoplay playsinline></video>
+      <video id="localVideo" autoplay playsinline muted></video>
+      <canvas id="drawingCanvas"></canvas>
+      <audio id="remoteAudio" autoplay playsinline></audio>
+    </div>
+    
+    <div class="controls">
+      <button class="tool-btn active" id="brushBtn" title="Brush">Draw</button>
+      <button class="tool-btn" id="eraserBtn" title="Eraser">Erase</button>
+      
+      <div class="separator"></div>
+      
+      <div class="color-picker">
+        <span style="color: #ccc; font-size: 12px;">Color:</span>
+        <div class="color-option active" style="background: white;" data-color="white"></div>
+        <div class="color-option" style="background: #48e6cf;" data-color="#48e6cf"></div>
+        <div class="color-option" style="background: #ffb14a;" data-color="#ffb14a"></div>
+        <div class="color-option" style="background: #ff6b7a;" data-color="#ff6b7a"></div>
+      </div>
+      
+      <div class="separator"></div>
+      
+      <label style="color: #ccc; font-size: 12px;">Size: <input type="range" id="brushSize" min="1" max="50" value="3" style="width: 60px;"></label>
+      
+      <div class="separator"></div>
+      
+      <button id="clearBtn">Clear</button>
+      <button id="toggleCameraBtn">Camera Off</button>
+      <button id="recordBtn">Record</button>
+      <button id="exportPdfBtn">Export PDF</button>
+    </div>
+  </div>
+
+  <script>
+    const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+    const STORAGE_KEY = 'enkryptonite-scribbles';
+    const state = {
+      roomId: '', participantId: '', displayName: '', role: '', room: null, participant: null,
+      remoteParticipantId: '', peerConnection: null, localStream: null, remoteStream: null, processedSignals: new Set(),
+      pendingCandidates: [], pollingTimer: null, heartbeatTimer: null, offerSent: false,
+      cameraEnabled: true, isDrawing: false, tool: 'brush', color: 'white', brushSize: 3,
+      mediaRecorder: null, recordingChunks: [], isRecording: false
+    };
+    // strokes: array of { tool, color, size, relativeToFace, points: [{x,y}] }
+    state.strokes = [];
+    // last detected face in canvas coordinates
+    state.currentFace = null;
+    state.lastFace = null;
+    let faceModel = null; // BlazeFace model
+    let detectingFace = false;
+
+
+    const remoteVideo = document.getElementById('remoteVideo');
+    const remoteAudio = document.getElementById('remoteAudio');
+    const localVideo = document.getElementById('localVideo');
+    const drawingCanvas = document.getElementById('drawingCanvas');
+    const ctx = drawingCanvas.getContext('2d');
+    
+    const brushBtn = document.getElementById('brushBtn');
+    const eraserBtn = document.getElementById('eraserBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const toggleCameraBtn = document.getElementById('toggleCameraBtn');
+    const recordBtn = document.getElementById('recordBtn');
+    const exportPdfBtn = document.getElementById('exportPdfBtn');
+    const brushSizeInput = document.getElementById('brushSize');
+    const colorOptions = document.querySelectorAll('.color-option');
+
+    function resizeCanvas() {
+      const container = drawingCanvas.parentElement;
+      drawingCanvas.width = container.offsetWidth;
+      drawingCanvas.height = container.offsetHeight;
+      ctx.strokeStyle = state.color;
+      ctx.fillStyle = state.color;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = state.brushSize;
+    }
+
+    function setupDrawing() {
+      // Force canvas to full container size
+      const container = drawingCanvas.parentElement;
+      drawingCanvas.width = container.offsetWidth || window.innerWidth;
+      drawingCanvas.height = container.offsetHeight || window.innerHeight;
+      
+      // Setup context
+      ctx.strokeStyle = state.color;
+      ctx.fillStyle = state.color;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = state.brushSize;
+      
+      window.addEventListener('resize', () => {
+        drawingCanvas.width = container.offsetWidth || window.innerWidth;
+        drawingCanvas.height = container.offsetHeight || window.innerHeight;
+        ctx.strokeStyle = state.color;
+        ctx.fillStyle = state.color;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = state.brushSize;
+        redrawCanvas();
+      });
+      
+      drawingCanvas.addEventListener('mousedown', startDrawing, true);
+      drawingCanvas.addEventListener('mousemove', draw, true);
+      drawingCanvas.addEventListener('mouseup', stopDrawing, true);
+      drawingCanvas.addEventListener('mouseout', stopDrawing, true);
+      
+      // Retry canvas sizing after a delay to ensure container is ready
+      setTimeout(() => {
+        drawingCanvas.width = container.offsetWidth || window.innerWidth;
+        drawingCanvas.height = container.offsetHeight || window.innerHeight;
+        ctx.strokeStyle = state.color;
+        ctx.fillStyle = state.color;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = state.brushSize;
+      }, 500);
+      
+      drawingCanvas.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        const touch = e.touches[0];
+        startDrawing({ clientX: touch.clientX, clientY: touch.clientY });
+      });
+      
+      drawingCanvas.addEventListener('touchmove', (e) => {
+        e.preventDefault();
+        const touch = e.touches[0];
+        draw({ clientX: touch.clientX, clientY: touch.clientY });
+      });
+      
+      drawingCanvas.addEventListener('touchend', (e) => { e.preventDefault(); stopDrawing(); });
+      
+      brushBtn.addEventListener('click', () => {
+        state.tool = 'brush';
+        brushBtn.classList.add('active');
+        eraserBtn.classList.remove('active');
+      });
+      
+      eraserBtn.addEventListener('click', () => {
+        state.tool = 'eraser';
+        eraserBtn.classList.add('active');
+        brushBtn.classList.remove('active');
+      });
+      
+      clearBtn.addEventListener('click', () => {
+        // clear canvas and stored strokes
+        state.strokes = [];
+        ctx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+        redrawCanvas();
+      });
+      
+      brushSizeInput.addEventListener('change', (e) => {
+        state.brushSize = parseInt(e.target.value);
+        ctx.lineWidth = state.brushSize;
+      });
+      
+      brushSizeInput.addEventListener('input', (e) => {
+        state.brushSize = parseInt(e.target.value);
+        ctx.lineWidth = state.brushSize;
+      });
+      
+      colorOptions.forEach(option => {
+        option.addEventListener('click', () => {
+          colorOptions.forEach(o => o.classList.remove('active'));
+          option.classList.add('active');
+          state.color = option.dataset.color;
+          ctx.strokeStyle = state.color;
+          ctx.fillStyle = state.color;
+        });
+      });
+      
+      toggleCameraBtn.addEventListener('click', async () => {
+        state.cameraEnabled = !state.cameraEnabled;
+        if (state.cameraEnabled) {
+          localVideo.style.display = 'block';
+          toggleCameraBtn.textContent = 'Camera Off';
+        } else {
+          localVideo.style.display = 'none';
+          toggleCameraBtn.textContent = 'Camera On';
+        }
+      });
+      
+      recordBtn.addEventListener('click', async () => {
+        if (state.isRecording) {
+          state.mediaRecorder.stop();
+          recordBtn.textContent = 'Record';
+        } else {
+          const canvas = drawingCanvas;
+          const stream = canvas.captureStream(30);
+          
+          if (state.cameraEnabled && state.localStream) {
+            state.localStream.getAudioTracks().forEach(track => stream.addTrack(track));
+          }
+          
+          state.mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+          state.recordingChunks = [];
+          
+          state.mediaRecorder.ondataavailable = (e) => {
+            state.recordingChunks.push(e.data);
+          };
+          
+          state.mediaRecorder.onstop = () => {
+            const blob = new Blob(state.recordingChunks, { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'drawing-' + Date.now() + '.webm';
+            a.click();
+            URL.revokeObjectURL(url);
+          };
+          
+          state.mediaRecorder.start();
+          recordBtn.textContent = 'Stop Record';
+          state.isRecording = true;
+        }
+      });
+      
+      exportPdfBtn.addEventListener('click', async () => {
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
+        script.onload = () => {
+          const canvas = drawingCanvas;
+          const imgData = canvas.toDataURL('image/png');
+          const pdf = new html2pdf.jsPDF({
+            orientation: 'portrait',
+            unit: 'px',
+            format: [canvas.width, canvas.height]
+          });
+          pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+          pdf.save('drawing-' + Date.now() + '.pdf');
+        };
+        document.head.appendChild(script);
+      });
+      
+      ctx.strokeStyle = state.color;
+      ctx.fillStyle = state.color;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = state.brushSize;
+      redrawCanvas();
+    }
+
+    function startDrawing(e) {
+      const p = getCanvasPoint(e);
+      state.isDrawing = true;
+      // Always store absolute points while drawing for responsive, predictable behavior
+      const points = [{ x: p.x, y: p.y }];
+      const stroke = { tool: state.tool, color: state.color, size: state.brushSize, relativeToFace: false, anchorFace: null, points };
+      state.strokes.push(stroke);
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+    }
+
+    function draw(e) {
+      if (!state.isDrawing) return;
+      const p = getCanvasPoint(e);
+      const stroke = state.strokes[state.strokes.length - 1];
+      if (!stroke) return;
+
+      // Always store absolute points while drawing for natural input feel
+      stroke.points.push({ x: p.x, y: p.y });
+      ctx.strokeStyle = stroke.color;
+      ctx.lineWidth = stroke.size;
+      if (stroke.tool === 'eraser') ctx.clearRect(p.x - stroke.size / 2, p.y - stroke.size / 2, stroke.size, stroke.size);
+      else { ctx.lineTo(p.x, p.y); ctx.stroke(); }
+    }
+
+    function stopDrawing() {
+      state.isDrawing = false;
+      ctx.closePath();
+      // On stroke end decide whether the stroke should be anchored to the face
+      const stroke = state.strokes[state.strokes.length - 1];
+      if (!stroke) return;
+      // If this was an eraser stroke, don't persist it (eraser acts immediately)
+      if (stroke.tool === 'eraser') {
+        state.strokes.pop();
+        return;
+      }
+      const face = state.currentFace || state.lastFace;
+      if (face) {
+        const anchorRegion = getFaceAnchorRegion(face);
+        const strokeTouchesFace = stroke.points.some(pt => pointInRegion(pt, anchorRegion));
+        const strokeStartsOnFace = stroke.points.length > 0 && pointInRegion(stroke.points[0], anchorRegion);
+        // Only anchor strokes that actually start on or stay connected to the face/body region.
+        if (strokeTouchesFace && strokeStartsOnFace) {
+          // capture anchor snapshot and normalize points
+          const anchor = { x: anchorRegion.x, y: anchorRegion.y, width: anchorRegion.width, height: anchorRegion.height };
+          stroke.anchorFace = anchor;
+          stroke.relativeToFace = true;
+          stroke.points = stroke.points.map(pt => ({ x: (pt.x - anchor.x) / anchor.width, y: (pt.y - anchor.y) / anchor.height }));
+        }
+      }
+      // redraw whole canvas so relative strokes render correctly
+      redrawCanvas();
+    }
+
+    function getCanvasPoint(e) {
+      const rect = drawingCanvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    function pointInRegion(point, region) {
+      return point.x >= region.x && point.x <= region.x + region.width && point.y >= region.y && point.y <= region.y + region.height;
+    }
+
+    function getFaceAnchorRegion(face) {
+      // Expand the face box so hair and nearby body parts can count as face-attached.
+      const x = face.x - face.width * 0.35;
+      const y = face.y - face.height * 0.9;
+      const width = face.width * 1.7;
+      const height = face.height * 2.35;
+      return { x, y, width, height };
+    }
+
+    function clearPeerConnection() {
+      state.offerSent = false;
+      state.pendingCandidates = [];
+      if (state.peerConnection) {
+        state.peerConnection.onicecandidate = null;
+        state.peerConnection.ontrack = null;
+        state.peerConnection.onconnectionstatechange = null;
+        state.peerConnection.close();
+        state.peerConnection = null;
+      }
+      state.remoteStream = null;
+      remoteVideo.srcObject = null;
+      remoteAudio.srcObject = null;
+    }
+
+    function stopLocalStream() {
+      if (state.localStream) {
+        state.localStream.getTracks().forEach((track) => track.stop());
+        state.localStream = null;
+      }
+      localVideo.srcObject = null;
+    }
+
+    function stopTimers() {
+      if (state.pollingTimer) clearInterval(state.pollingTimer);
+      if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+      state.pollingTimer = null;
+      state.heartbeatTimer = null;
+    }
+
+    function resetSession(leaveServer = true) {
+      const roomId = state.roomId;
+      const participantId = state.participantId;
+      clearPeerConnection();
+      stopLocalStream();
+      stopTimers();
+      if (leaveServer && roomId && participantId) {
+        fetch('/api/rooms/' + encodeURIComponent(roomId) + '/leave', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ participantId }), keepalive: true
+        }).catch(() => {});
+      }
+      state.roomId = ''; state.participantId = ''; state.displayName = ''; state.role = ''; state.room = null; state.participant = null; state.remoteParticipantId = ''; state.processedSignals = new Set();
+    }
+
+    async function ensureLocalMedia() {
+      if (state.localStream) return state.localStream;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      state.localStream = stream;
+      localVideo.srcObject = stream;
+      localVideo.play().catch(() => {});
+      // load face model once local video is available
+      loadFaceModel().catch(() => {});
+      return stream;
+    }
+
+    function ensurePeerConnection() {
+      if (state.peerConnection) return state.peerConnection;
+      const peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      state.peerConnection = peerConnection;
+      if (state.localStream) state.localStream.getTracks().forEach((track) => peerConnection.addTrack(track, state.localStream));
+      peerConnection.onicecandidate = ({ candidate }) => {
+        if (!candidate || !state.remoteParticipantId) return;
+        sendSignal('ice', { candidate: candidate.toJSON ? candidate.toJSON() : candidate }, state.remoteParticipantId).catch(() => {});
+      };
+      peerConnection.ontrack = (event) => {
+        if (!state.remoteStream) {
+          state.remoteStream = new MediaStream();
+        }
+        state.remoteStream.addTrack(event.track);
+        remoteVideo.srcObject = state.remoteStream;
+        remoteAudio.srcObject = state.remoteStream;
+        remoteVideo.play().catch(() => {});
+        remoteAudio.play().catch(() => {});
+      };
+      peerConnection.onconnectionstatechange = () => {
+        const connectionState = peerConnection.connectionState;
+        if (connectionState === 'disconnected' || connectionState === 'failed' || connectionState === 'closed') {
+          clearPeerConnection();
+        }
+      };
+      return peerConnection;
+    }
+
+    // Face model loading and detection loop
+    async function loadFaceModel() {
+      if (faceModel) return;
+      try {
+        if (typeof blazeface === 'undefined') {
+          console.warn('BlazeFace not available');
+          return;
+        }
+        faceModel = await blazeface.load();
+        startFaceDetectionLoop();
+      } catch (err) {
+        console.error('Failed to load face model', err);
+      }
+    }
+
+    function startFaceDetectionLoop() {
+      if (detectingFace) return;
+      detectingFace = true;
+      async function loop() {
+        try {
+          if (faceModel && localVideo && localVideo.readyState >= 2) {
+            const predictions = await faceModel.estimateFaces(localVideo, false);
+            const canvasRect = drawingCanvas.getBoundingClientRect();
+            const videoRect = localVideo.getBoundingClientRect();
+            const videoW = localVideo.videoWidth || localVideo.clientWidth;
+            const videoH = localVideo.videoHeight || localVideo.clientHeight;
+            const scale = Math.min(videoRect.width / (videoW || 1), videoRect.height / (videoH || 1));
+            const xOffset = videoRect.left - canvasRect.left + (videoRect.width - (videoW * scale)) / 2;
+            const yOffset = videoRect.top - canvasRect.top + (videoRect.height - (videoH * scale)) / 2;
+            if (predictions && predictions.length > 0) {
+              const p = predictions[0];
+              const topLeft = p.topLeft;
+              const bottomRight = p.bottomRight;
+              const x = topLeft[0] * scale + xOffset;
+              const y = topLeft[1] * scale + yOffset;
+              const w = (bottomRight[0] - topLeft[0]) * scale;
+              const h = (bottomRight[1] - topLeft[1]) * scale;
+              state.currentFace = { x, y, width: w, height: h, centerX: x + w / 2, centerY: y + h / 2 };
+              state.lastFace = state.currentFace;
+            } else {
+              state.currentFace = null;
+            }
+          }
+        } catch (err) {
+          console.error('Face detection loop error', err);
+        }
+        redrawCanvas();
+        requestAnimationFrame(loop);
+      }
+      loop();
+    }
+
+    function redrawCanvas() {
+      // clear and redraw all strokes transformed by current face
+      ctx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+      // Draw absolute strokes first (stored as absolute canvas coords)
+      for (const stroke of state.strokes.filter(s => !s.relativeToFace)) {
+        if (!stroke.points || stroke.points.length === 0) continue;
+        ctx.strokeStyle = stroke.color;
+        ctx.lineWidth = stroke.size;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        const first = stroke.points[0];
+        ctx.moveTo(first.x, first.y);
+        for (let i = 1; i < stroke.points.length; i++) {
+          const p = stroke.points[i];
+          ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+        ctx.closePath();
+      }
+      // Then draw face-relative strokes mapped to the current face
+      for (const stroke of state.strokes.filter(s => s.relativeToFace)) {
+        if (!stroke.points || stroke.points.length === 0) continue;
+        const face = state.currentFace || state.lastFace || stroke.anchorFace;
+        if (!face) continue;
+        ctx.strokeStyle = stroke.color;
+        ctx.lineWidth = stroke.size;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        const first = stroke.points[0];
+        const startX = face.x + first.x * face.width;
+        const startY = face.y + first.y * face.height;
+        ctx.moveTo(startX, startY);
+        for (let i = 1; i < stroke.points.length; i++) {
+          const p = stroke.points[i];
+          const x = face.x + p.x * face.width;
+          const y = face.y + p.y * face.height;
+          ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.closePath();
+      }
+    }
+
+    async function sendSignal(type, payload, targetParticipantId = state.remoteParticipantId) {
+      if (!state.roomId || !state.participantId || !targetParticipantId) return;
+      await fetch('/api/rooms/' + encodeURIComponent(state.roomId) + '/signals', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromParticipantId: state.participantId, toParticipantId: targetParticipantId, type, payload })
+      }).catch(() => {});
+    }
+
+    function flushPendingCandidates() {
+      if (!state.peerConnection || !state.peerConnection.remoteDescription) return;
+      state.pendingCandidates.splice(0).forEach((candidate) => state.peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {}));
+    }
+
+    async function startCallerNegotiation() {
+      if (state.role !== 'caller' || !state.remoteParticipantId || state.offerSent) return;
+      const peerConnection = ensurePeerConnection();
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      await sendSignal('offer', { sdp: peerConnection.localDescription });
+      state.offerSent = true;
+    }
+
+    async function handleOffer(signal) {
+      const peerConnection = ensurePeerConnection();
+      if (peerConnection.signalingState !== 'stable') return;
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.payload.sdp));
+      flushPendingCandidates();
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      await sendSignal('answer', { sdp: peerConnection.localDescription }, signal.fromParticipantId);
+      state.offerSent = true;
+    }
+
+    async function handleAnswer(signal) {
+      if (!state.peerConnection || !signal.payload || !signal.payload.sdp) return;
+      await state.peerConnection.setRemoteDescription(new RTCSessionDescription(signal.payload.sdp));
+      flushPendingCandidates();
+    }
+
+    async function handleIce(signal) {
+      if (!signal.payload || !signal.payload.candidate) return;
+      if (state.peerConnection && state.peerConnection.remoteDescription) {
+        await state.peerConnection.addIceCandidate(new RTCIceCandidate(signal.payload.candidate));
+      } else {
+        state.pendingCandidates.push(signal.payload.candidate);
+      }
+    }
+
+    async function handleSignal(signal) {
+      if (state.processedSignals.has(signal.id)) return;
+      state.processedSignals.add(signal.id);
+      if (signal.fromParticipantId) state.remoteParticipantId = signal.fromParticipantId;
+      if (signal.type === 'offer') await handleOffer(signal);
+      else if (signal.type === 'answer') await handleAnswer(signal);
+      else if (signal.type === 'ice') await handleIce(signal);
+    }
+
+    async function refreshRoomState() {
+      if (!state.roomId || !state.participantId) return;
+      const data = await fetch('/api/rooms/' + encodeURIComponent(state.roomId) + '/state?participantId=' + encodeURIComponent(state.participantId)).then(r => r.json()).catch(() => ({}));
+      if (!data.room) return;
+      state.room = data.room;
+      state.participant = data.participant;
+      state.role = data.participant.role;
+      const nextRemoteId = state.room.participants.find((p) => p.id !== state.participantId)?.id || '';
+      if (!nextRemoteId && state.peerConnection) {
+        clearPeerConnection();
+      } else if (state.remoteParticipantId && state.remoteParticipantId !== nextRemoteId) {
+        clearPeerConnection();
+      }
+      state.remoteParticipantId = nextRemoteId;
+      for (const signal of data.signals || []) await handleSignal(signal);
+      if (state.role === 'caller' && state.remoteParticipantId) await startCallerNegotiation();
+    }
+
+    async function heartbeat() {
+      if (!state.roomId || !state.participantId) return;
+      await fetch('/api/rooms/' + encodeURIComponent(state.roomId) + '/heartbeat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ participantId: state.participantId })
+      }).catch(() => {});
+    }
+
+
+    window.addEventListener('beforeunload', () => resetSession(false));
+
+    setupDrawing();
+    ensureLocalMedia().catch(err => console.error('Camera error:', err));
+  </script>
+</body>
+</html>
