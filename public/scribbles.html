@@ -142,7 +142,7 @@
 
   <script>
     const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
-    const STORAGE_KEY = 'enkryptonite-scribbles';
+    const STORAGE_KEY = 'scribbles';
     const state = {
       roomId: '', participantId: '', displayName: '', role: '', room: null, participant: null,
       remoteParticipantId: '', peerConnection: null, localStream: null, remoteStream: null, processedSignals: new Set(),
@@ -352,54 +352,63 @@
     function startDrawing(e) {
       const p = getCanvasPoint(e);
       state.isDrawing = true;
-      // Always store absolute points while drawing for responsive, predictable behavior
-      const points = [{ x: p.x, y: p.y }];
-      const stroke = { tool: state.tool, color: state.color, size: state.brushSize, relativeToFace: false, anchorFace: null, points };
+
+      const stroke = {
+        tool: state.tool,
+        color: state.color,
+        size: state.brushSize,
+        relativeToFace: false,
+        anchorFace: null,
+        points: [{ x: p.x, y: p.y }]
+      };
+
       state.strokes.push(stroke);
-      ctx.beginPath();
-      ctx.moveTo(p.x, p.y);
     }
 
     function draw(e) {
       if (!state.isDrawing) return;
+
       const p = getCanvasPoint(e);
       const stroke = state.strokes[state.strokes.length - 1];
       if (!stroke) return;
 
-      // Always store absolute points while drawing for natural input feel
       stroke.points.push({ x: p.x, y: p.y });
-      ctx.strokeStyle = stroke.color;
-      ctx.lineWidth = stroke.size;
-      if (stroke.tool === 'eraser') ctx.clearRect(p.x - stroke.size / 2, p.y - stroke.size / 2, stroke.size, stroke.size);
-      else { ctx.lineTo(p.x, p.y); ctx.stroke(); }
-    }
 
+      redrawCanvas();
+    }
     function stopDrawing() {
       state.isDrawing = false;
       ctx.closePath();
-      // On stroke end decide whether the stroke should be anchored to the face
+
       const stroke = state.strokes[state.strokes.length - 1];
       if (!stroke) return;
-      // If this was an eraser stroke, don't persist it (eraser acts immediately)
+
       if (stroke.tool === 'eraser') {
         state.strokes.pop();
         return;
       }
-      const face = state.currentFace || state.lastFace;
-      if (face) {
-        const anchorRegion = getFaceAnchorRegion(face);
-        const strokeTouchesFace = stroke.points.some(pt => pointInRegion(pt, anchorRegion));
-        const strokeStartsOnFace = stroke.points.length > 0 && pointInRegion(stroke.points[0], anchorRegion);
-        // Only anchor strokes that actually start on or stay connected to the face/body region.
-        if (strokeTouchesFace && strokeStartsOnFace) {
-          // capture anchor snapshot and normalize points
-          const anchor = { x: anchorRegion.x, y: anchorRegion.y, width: anchorRegion.width, height: anchorRegion.height };
-          stroke.anchorFace = anchor;
-          stroke.relativeToFace = true;
-          stroke.points = stroke.points.map(pt => ({ x: (pt.x - anchor.x) / anchor.width, y: (pt.y - anchor.y) / anchor.height }));
-        }
+
+      const face = state.currentFace;
+      const region = face ? getFaceAnchorRegion(face) : null;
+
+      const start = stroke.points[0];
+
+      const shouldAttachToFace =
+        face &&
+        region &&
+        (pointInRegion(start, region) ||
+        pointInRegion(stroke.points[Math.floor(stroke.points.length / 2)], region));
+
+      if (shouldAttachToFace) {
+        stroke.relativeToFace = true;
+        stroke.anchorFace = region;
+
+        stroke.points = stroke.points.map(pt => ({
+          x: (pt.x - region.x) / region.width,
+          y: (pt.y - region.y) / region.height
+        }));
       }
-      // redraw whole canvas so relative strokes render correctly
+
       redrawCanvas();
     }
 
@@ -557,45 +566,49 @@
     }
 
     function redrawCanvas() {
-      // clear and redraw all strokes transformed by current face
       ctx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
-      // Draw absolute strokes first (stored as absolute canvas coords)
-      for (const stroke of state.strokes.filter(s => !s.relativeToFace)) {
-        if (!stroke.points || stroke.points.length === 0) continue;
+
+      for (const stroke of state.strokes) {
+        if (!stroke.points.length) continue;
+
         ctx.strokeStyle = stroke.color;
         ctx.lineWidth = stroke.size;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
+
         ctx.beginPath();
-        const first = stroke.points[0];
-        ctx.moveTo(first.x, first.y);
-        for (let i = 1; i < stroke.points.length; i++) {
-          const p = stroke.points[i];
-          ctx.lineTo(p.x, p.y);
+
+        const face = stroke.relativeToFace
+          ? (state.currentFace || state.lastFace || stroke.anchorFace)
+          : null;
+
+        if (stroke.relativeToFace && face) {
+          const region = getFaceAnchorRegion(face);
+
+          const first = stroke.points[0];
+          ctx.moveTo(
+            region.x + first.x * region.width,
+            region.y + first.y * region.height
+          );
+
+          for (let i = 1; i < stroke.points.length; i++) {
+            const p = stroke.points[i];
+            ctx.lineTo(
+              region.x + p.x * region.width,
+              region.y + p.y * region.height
+            );
+          }
+
+        } else {
+          const first = stroke.points[0];
+          ctx.moveTo(first.x, first.y);
+
+          for (let i = 1; i < stroke.points.length; i++) {
+            const p = stroke.points[i];
+            ctx.lineTo(p.x, p.y);
+          }
         }
-        ctx.stroke();
-        ctx.closePath();
-      }
-      // Then draw face-relative strokes mapped to the current face
-      for (const stroke of state.strokes.filter(s => s.relativeToFace)) {
-        if (!stroke.points || stroke.points.length === 0) continue;
-        const face = state.currentFace || state.lastFace || stroke.anchorFace;
-        if (!face) continue;
-        ctx.strokeStyle = stroke.color;
-        ctx.lineWidth = stroke.size;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.beginPath();
-        const first = stroke.points[0];
-        const startX = face.x + first.x * face.width;
-        const startY = face.y + first.y * face.height;
-        ctx.moveTo(startX, startY);
-        for (let i = 1; i < stroke.points.length; i++) {
-          const p = stroke.points[i];
-          const x = face.x + p.x * face.width;
-          const y = face.y + p.y * face.height;
-          ctx.lineTo(x, y);
-        }
+
         ctx.stroke();
         ctx.closePath();
       }
