@@ -101,8 +101,8 @@
     
     .separator { width: 1px; height: 24px; background: rgba(255, 255, 255, 0.2); }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.0.7/dist/blazeface.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 </head>
 <body>
   <div class="container">
@@ -155,8 +155,8 @@
     // last detected face in canvas coordinates
     state.currentFace = null;
     state.lastFace = null;
-    let faceModel = null; // BlazeFace model
-    let detectingFace = false;
+    let faceMesh = null; // BlazeFace model
+    let camera = null;
 
 
     const remoteVideo = document.getElementById('remoteVideo');
@@ -348,6 +348,70 @@
       ctx.lineWidth = state.brushSize;
       redrawCanvas();
     }
+    function startFaceDetectionLoop() {
+      if (detectingFace) return;
+      detectingFace = true;
+
+      async function detect() {
+        try {
+          if (faceModel && localVideo && localVideo.readyState >= 2) {
+            const predictions = await faceModel.estimateFaces(localVideo, false);
+
+            const canvasRect = drawingCanvas.getBoundingClientRect();
+            const videoRect = localVideo.getBoundingClientRect();
+
+            const videoW = localVideo.videoWidth || localVideo.clientWidth;
+            const videoH = localVideo.videoHeight || localVideo.clientHeight;
+
+            const scale = Math.min(
+              videoRect.width / (videoW || 1),
+              videoRect.height / (videoH || 1)
+            );
+
+            const xOffset =
+              videoRect.left - canvasRect.left +
+              (videoRect.width - videoW * scale) / 2;
+
+            const yOffset =
+              videoRect.top - canvasRect.top +
+              (videoRect.height - videoH * scale) / 2;
+
+            if (predictions.length > 0) {
+              const p = predictions[0];
+              const [x1, y1] = p.topLeft;
+              const [x2, y2] = p.bottomRight;
+
+              const newFace = {
+                x: x1 * scale + xOffset,
+                y: y1 * scale + yOffset,
+                width: (x2 - x1) * scale,
+                height: (y2 - y1) * scale
+              };
+              const alpha = 0.7;
+              if (state.currentFace) {
+                state.currentFace = {
+                  x: alpha * state.currentFace.x + (1 - alpha) * newFace.x,
+                  y: alpha * state.currentFace.y + (1 - alpha) * newFace.y,
+                  width: alpha * state.currentFace.width + (1 - alpha) * newFace.width,
+                  height: alpha * state.currentFace.height + (1 - alpha) * newFace.height
+                };
+              } else {
+                state.currentFace = newFace;
+              }
+
+              state.lastFace = state.currentFace;
+            } else {
+              state.currentFace = null;
+            }
+          }
+        } catch (err) {
+          console.error(err);
+        }
+        setTimeout(detect, 30);
+      }
+
+      detect();
+    }
 
     function startDrawing(e) {
       const p = getCanvasPoint(e);
@@ -481,7 +545,7 @@
       localVideo.srcObject = stream;
       localVideo.play().catch(() => {});
       // load face model once local video is available
-      loadFaceModel().catch(() => {});
+      initFaceMesh();
       return stream;
     }
 
@@ -512,59 +576,6 @@
       };
       return peerConnection;
     }
-
-    // Face model loading and detection loop
-    async function loadFaceModel() {
-      if (faceModel) return;
-      try {
-        if (typeof blazeface === 'undefined') {
-          console.warn('BlazeFace not available');
-          return;
-        }
-        faceModel = await blazeface.load();
-        startFaceDetectionLoop();
-      } catch (err) {
-        console.error('Failed to load face model', err);
-      }
-    }
-
-    function startFaceDetectionLoop() {
-      if (detectingFace) return;
-      detectingFace = true;
-      async function loop() {
-        try {
-          if (faceModel && localVideo && localVideo.readyState >= 2) {
-            const predictions = await faceModel.estimateFaces(localVideo, false);
-            const canvasRect = drawingCanvas.getBoundingClientRect();
-            const videoRect = localVideo.getBoundingClientRect();
-            const videoW = localVideo.videoWidth || localVideo.clientWidth;
-            const videoH = localVideo.videoHeight || localVideo.clientHeight;
-            const scale = Math.min(videoRect.width / (videoW || 1), videoRect.height / (videoH || 1));
-            const xOffset = videoRect.left - canvasRect.left + (videoRect.width - (videoW * scale)) / 2;
-            const yOffset = videoRect.top - canvasRect.top + (videoRect.height - (videoH * scale)) / 2;
-            if (predictions && predictions.length > 0) {
-              const p = predictions[0];
-              const topLeft = p.topLeft;
-              const bottomRight = p.bottomRight;
-              const x = topLeft[0] * scale + xOffset;
-              const y = topLeft[1] * scale + yOffset;
-              const w = (bottomRight[0] - topLeft[0]) * scale;
-              const h = (bottomRight[1] - topLeft[1]) * scale;
-              state.currentFace = { x, y, width: w, height: h, centerX: x + w / 2, centerY: y + h / 2 };
-              state.lastFace = state.currentFace;
-            } else {
-              state.currentFace = null;
-            }
-          }
-        } catch (err) {
-          console.error('Face detection loop error', err);
-        }
-        redrawCanvas();
-        requestAnimationFrame(loop);
-      }
-      loop();
-    }
-
     function redrawCanvas() {
       ctx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
 
@@ -695,6 +706,76 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ participantId: state.participantId })
       }).catch(() => {});
     }
+    function initFaceMesh() {
+      faceMesh = new FaceMesh({
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+        }
+      });
+
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+
+      faceMesh.onResults(onFaceResults);
+
+      camera = new Camera(localVideo, {
+        onFrame: async () => {
+          if (faceMesh) {
+            await faceMesh.send({ image: localVideo });
+          }
+        },
+        width: 640,
+        height: 480
+      });
+
+      camera.start();
+    }
+    function onFaceResults(results) {
+      if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+        state.currentFace = null;
+        return;
+      }
+
+      const landmarks = results.multiFaceLandmarks[0];
+
+      let minX = 1, minY = 1, maxX = 0, maxY = 0;
+
+      for (const pt of landmarks) {
+        minX = Math.min(minX, pt.x);
+        minY = Math.min(minY, pt.y);
+        maxX = Math.max(maxX, pt.x);
+        maxY = Math.max(maxY, pt.y);
+      }
+
+      const canvasRect = drawingCanvas.getBoundingClientRect();
+
+      const x = minX * canvasRect.width;
+      const y = minY * canvasRect.height;
+      const w = (maxX - minX) * canvasRect.width;
+      const h = (maxY - minY) * canvasRect.height;
+
+      const newFace = {
+        x,
+        y,
+        width: w,
+        height: h,
+        centerX: x + w / 2,
+        centerY: y + h / 2
+      };
+
+      state.currentFace = newFace;
+      state.lastFace = newFace;
+    }
+    function renderLoop() {
+      redrawCanvas(); // always redraw
+      requestAnimationFrame(renderLoop);
+    }
+
+    renderLoop();
 
 
     window.addEventListener('beforeunload', () => resetSession(false));
