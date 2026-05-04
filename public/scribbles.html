@@ -417,16 +417,14 @@
       const p = getCanvasPoint(e);
       state.isDrawing = true;
 
-      const stroke = {
+      state.strokes.push({
         tool: state.tool,
         color: state.color,
         size: state.brushSize,
         relativeToFace: false,
         anchorFace: null,
         points: [{ x: p.x, y: p.y }]
-      };
-
-      state.strokes.push(stroke);
+      });
     }
 
     function draw(e) {
@@ -447,21 +445,19 @@
       const stroke = state.strokes[state.strokes.length - 1];
       if (!stroke) return;
 
-      if (stroke.tool === 'eraser') {
-        state.strokes.pop();
-        return;
-      }
-
       const face = state.currentFace;
       const region = face ? getFaceAnchorRegion(face) : null;
+
+      if (!face || !region) return;
 
       const start = stroke.points[0];
 
       const shouldAttachToFace =
-        face &&
-        region &&
-        (pointInRegion(start, region) ||
-        pointInRegion(stroke.points[Math.floor(stroke.points.length / 2)], region));
+        pointInRegion(start, region) ||
+        pointInRegion(
+          stroke.points[Math.floor(stroke.points.length / 2)],
+          region
+        );
 
       if (shouldAttachToFace) {
         stroke.relativeToFace = true;
@@ -472,8 +468,6 @@
           y: (pt.y - region.y) / region.height
         }));
       }
-
-      redrawCanvas();
     }
 
     function getCanvasPoint(e) {
@@ -581,8 +575,14 @@
 
       for (const stroke of state.strokes) {
         if (!stroke.points.length) continue;
+        if (stroke.tool === 'eraser') {
+          ctx.globalCompositeOperation = 'destination-out';
+          ctx.strokeStyle = 'rgba(0,0,0,1)'; // color doesn't matter for erasing
+        } else {
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.strokeStyle = stroke.color;
+        }
 
-        ctx.strokeStyle = stroke.color;
         ctx.lineWidth = stroke.size;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
@@ -606,7 +606,7 @@
             const p = stroke.points[i];
             ctx.lineTo(
               region.x + p.x * region.width,
-              region.y + p.y * region.height
+            region.y + p.y * region.height
             );
           }
 
@@ -623,6 +623,7 @@
         ctx.stroke();
         ctx.closePath();
       }
+      ctx.globalCompositeOperation = 'source-over';
     }
 
     async function sendSignal(type, payload, targetParticipantId = state.remoteParticipantId) {
