@@ -452,12 +452,9 @@
 
       const start = stroke.points[0];
 
-      const shouldAttachToFace =
-        pointInRegion(start, region) ||
-        pointInRegion(
-          stroke.points[Math.floor(stroke.points.length / 2)],
-          region
-        );
+      const shouldAttachToFace = stroke.points.some(p =>
+        pointInRegion(p, region)
+      );
 
       if (shouldAttachToFace) {
         stroke.relativeToFace = true;
@@ -480,14 +477,13 @@
     }
 
     function getFaceAnchorRegion(face) {
-      // Expand the face box so hair and nearby body parts can count as face-attached.
-      const x = face.x - face.width * 0.35;
-      const y = face.y - face.height * 0.9;
-      const width = face.width * 1.7;
-      const height = face.height * 2.35;
-      return { x, y, width, height };
+      return {
+        x: face.x - face.width * 0.4,
+        y: face.y - face.height * 0.8,
+        width: face.width * 1.8,
+        height: face.height * 3.0
+      };
     }
-
     function clearPeerConnection() {
       state.offerSent = false;
       state.pendingCandidates = [];
