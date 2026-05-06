@@ -163,6 +163,13 @@
     const remoteAudio = document.getElementById('remoteAudio');
     const localVideo = document.getElementById('localVideo');
     const drawingCanvas = document.getElementById('drawingCanvas');
+    const displayCanvas = document.createElement('canvas');
+    const displayCtx = displayCanvas.getContext('2d'); 
+    drawingCanvas.parentElement.appendChild(displayCanvas);
+    displayCanvas.style.position = 'absolute';
+    displayCanvas.style.top = '0';
+    displayCanvas.style.left = '0';
+    displayCanvas.style.zIndex = '5';   
     const ctx = drawingCanvas.getContext('2d');
     
     const brushBtn = document.getElementById('brushBtn');
@@ -173,6 +180,8 @@
     const exportPdfBtn = document.getElementById('exportPdfBtn');
     const brushSizeInput = document.getElementById('brushSize');
     const colorOptions = document.querySelectorAll('.color-option');
+    const recordCanvas = document.createElement('canvas');
+    const recordCtx = recordCanvas.getContext('2d');
 
     function resizeCanvas() {
       const container = drawingCanvas.parentElement;
@@ -209,10 +218,10 @@
         redrawCanvas();
       });
       
-      drawingCanvas.addEventListener('mousedown', startDrawing, true);
-      drawingCanvas.addEventListener('mousemove', draw, true);
-      drawingCanvas.addEventListener('mouseup', stopDrawing, true);
-      drawingCanvas.addEventListener('mouseout', stopDrawing, true);
+      displayCanvas.addEventListener('mousedown', startDrawing, true);
+      displayCanvas.addEventListener('mousemove', draw, true);
+      displayCanvas.addEventListener('mouseup', stopDrawing, true);
+      displayCanvas.addEventListener('mouseout', stopDrawing, true);
       
       // Retry canvas sizing after a delay to ensure container is ready
       setTimeout(() => {
@@ -289,41 +298,29 @@
         }
       });
       
-      recordBtn.addEventListener('click', async () => {
-        if (state.isRecording) {
-          state.mediaRecorder.stop();
-          recordBtn.textContent = 'Record';
-        } else {
-          const canvas = drawingCanvas;
-          const stream = canvas.captureStream(30);
-          
-          if (state.cameraEnabled && state.localStream) {
-            state.localStream.getAudioTracks().forEach(track => stream.addTrack(track));
-          }
-          
-          state.mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-          state.recordingChunks = [];
-          
-          state.mediaRecorder.ondataavailable = (e) => {
-            state.recordingChunks.push(e.data);
-          };
-          
-          state.mediaRecorder.onstop = () => {
-            const blob = new Blob(state.recordingChunks, { type: 'video/webm' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'drawing-' + Date.now() + '.webm';
-            a.click();
-            URL.revokeObjectURL(url);
-          };
-          
-          state.mediaRecorder.start();
-          recordBtn.textContent = 'Stop Record';
-          state.isRecording = true;
-        }
-      });
-      
+      let recordingStartTime = 0;
+      let recordingTimerInterval = null;
+
+      const timerDisplay = document.createElement('div');
+      timerDisplay.style.position = 'absolute';
+      timerDisplay.style.top = '20px';
+      timerDisplay.style.left = '50%';
+      timerDisplay.style.transform = 'translateX(-50%)';
+      timerDisplay.style.color = 'white';
+      timerDisplay.style.fontSize = '16px';
+      timerDisplay.style.background = 'rgba(0,0,0,0.6)';
+      timerDisplay.style.padding = '6px 12px';
+      timerDisplay.style.borderRadius = '6px';
+      timerDisplay.style.zIndex = '20';
+      timerDisplay.style.display = 'none';
+      document.body.appendChild(timerDisplay);
+
+      function formatTime(ms) {
+        const s = Math.floor(ms / 1000);
+        const m = Math.floor(s / 60);
+        const sec = s % 60;
+        return `${m}:${sec.toString().padStart(2, '0')}`;
+      }
       exportPdfBtn.addEventListener('click', async () => {
         const script = document.createElement('script');
         script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
@@ -340,6 +337,131 @@
         };
         document.head.appendChild(script);
       });
+      recordBtn.addEventListener('click', () => {
+        if (state.isRecording) {
+          state.isRecording = false;
+
+          if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') {
+            state.mediaRecorder.stop();
+          }
+
+          clearInterval(recordingTimerInterval);
+          timerDisplay.style.display = 'none';
+
+          recordBtn.textContent = 'Record';
+            return;
+          }
+          state.recordingChunks = [];
+
+          const stream = displayCanvas.captureStream(30);
+
+        // add audio
+          if (state.cameraEnabled && state.localStream) {
+            state.localStream.getAudioTracks().forEach(track => {
+            stream.addTrack(track);
+          });
+        }
+
+        state.mediaRecorder = new MediaRecorder(stream, {
+          mimeType: 'video/webm'
+        });
+
+        state.mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) {
+            state.recordingChunks.push(e.data);
+          }
+        };
+
+        state.mediaRecorder.onstop = () => {
+          const blob = new Blob(state.recordingChunks, { type: 'video/webm' });
+          const url = URL.createObjectURL(blob);
+
+          const overlay = document.createElement('div');
+          overlay.style.position = 'absolute';
+          overlay.style.top = '0';
+          overlay.style.left = '0';
+          overlay.style.width = '100%';
+          overlay.style.height = '100%';
+          overlay.style.background = 'rgba(0,0,0,0.9)';
+          overlay.style.zIndex = '40';
+
+          const video = document.createElement('video');
+          video.src = url;
+          video.controls = true; 
+          video.style.position = 'absolute';
+          video.style.top = '50%';
+          video.style.left = '50%';
+          video.style.transform = 'translate(-50%, -50%)';
+          video.style.width = '60%';
+          video.style.background = '#000';
+
+          // click to toggle play/pause
+          video.onclick = () => {
+            if (video.paused) video.play();
+            else video.pause();
+          };
+
+          const playBtn = document.createElement('button');
+          playBtn.textContent = 'Play';
+          playBtn.style.position = 'absolute';
+          playBtn.style.top = '20px';
+          playBtn.style.left = '20px';
+
+          playBtn.onclick = () => {
+            if (video.paused) {
+              video.play();
+              playBtn.textContent = 'Pause';
+            } else {
+              video.pause();
+              playBtn.textContent = 'Play';
+            }
+          };
+
+          const downloadBtn = document.createElement('button');
+          downloadBtn.textContent = 'Download';
+          downloadBtn.style.position = 'absolute';
+          downloadBtn.style.top = '20px';
+          downloadBtn.style.left = '100px';
+
+          downloadBtn.onclick = () => {
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'recording-' + Date.now() + '.webm';
+            a.click();
+          };
+
+          const closeBtn = document.createElement('button');
+          closeBtn.textContent = 'X';
+          closeBtn.style.position = 'absolute';
+          closeBtn.style.top = '20px';
+          closeBtn.style.right = '20px';
+
+          closeBtn.onclick = () => {
+            document.body.removeChild(overlay);
+            URL.revokeObjectURL(url);
+          };
+
+          overlay.appendChild(video);
+          overlay.appendChild(playBtn);
+          overlay.appendChild(downloadBtn);
+          overlay.appendChild(closeBtn);
+
+          document.body.appendChild(overlay);
+        };
+        state.isRecording = true;
+        drawRecordingFrame();
+        state.mediaRecorder.start();
+
+        recordBtn.textContent = 'Stop';
+
+        // timer
+        recordingStartTime = Date.now();
+        timerDisplay.style.display = 'block';
+
+        recordingTimerInterval = setInterval(() => {
+          timerDisplay.textContent = formatTime(Date.now() - recordingStartTime);
+        }, 200);
+      });
       
       ctx.strokeStyle = state.color;
       ctx.fillStyle = state.color;
@@ -347,6 +469,44 @@
       ctx.lineJoin = 'round';
       ctx.lineWidth = state.brushSize;
       redrawCanvas();
+    }
+    function drawRecordingFrame() {
+      if (!state.isRecording) return;
+
+      const w = drawingCanvas.width;
+      const h = drawingCanvas.height;
+
+      if (recordCanvas.width !== w) recordCanvas.width = w;
+      if (recordCanvas.height !== h) recordCanvas.height = h;
+
+      recordCtx.clearRect(0, 0, w, h);
+
+      if (state.cameraEnabled && localVideo.readyState >= 2) {
+        const videoW = localVideo.videoWidth;
+        const videoH = localVideo.videoHeight;
+
+        const canvasAspect = w / h;
+        const videoAspect = videoW / videoH;
+
+        let drawW, drawH, offsetX, offsetY;
+
+        if (videoAspect > canvasAspect) {
+          drawW = w;
+          drawH = w / videoAspect;
+          offsetX = 0;
+          offsetY = (h - drawH) / 2;
+        } else {
+          drawH = h;
+          drawW = h * videoAspect;
+          offsetX = (w - drawW) / 2;
+          offsetY = 0;
+        }
+
+        recordCtx.drawImage(localVideo, offsetX, offsetY, drawW, drawH);
+      }
+      recordCtx.drawImage(drawingCanvas, 0, 0);
+
+      requestAnimationFrame(drawRecordingFrame);
     }
     function startFaceDetectionLoop() {
       if (detectingFace) return;
@@ -468,7 +628,7 @@
     }
 
     function getCanvasPoint(e) {
-      const rect = drawingCanvas.getBoundingClientRect();
+      const rect = displayCanvas.getBoundingClientRect();
       return { x: e.clientX - rect.left, y: e.clientY - rect.top };
     }
 
@@ -768,7 +928,35 @@
       state.lastFace = newFace;
     }
     function renderLoop() {
-      redrawCanvas(); // always redraw
+      const w = drawingCanvas.width;
+      const h = drawingCanvas.height;
+
+      if (displayCanvas.width !== w) displayCanvas.width = w;
+      if (displayCanvas.height !== h) displayCanvas.height = h;
+
+      displayCtx.clearRect(0, 0, w, h);
+
+      // draw video EXACTLY as shown
+      if (state.cameraEnabled && localVideo.readyState >= 2) {
+        const videoRect = localVideo.getBoundingClientRect();
+        const canvasRect = displayCanvas.getBoundingClientRect();
+
+        const scaleX = canvasRect.width / videoRect.width;
+        const scaleY = canvasRect.height / videoRect.height;
+
+        displayCtx.drawImage(
+          localVideo,
+          0,
+          0,
+          videoRect.width * scaleX,
+          videoRect.height * scaleY
+        );
+      }
+
+      // draw your strokes
+      redrawCanvas(); // draws into drawingCanvas
+      displayCtx.drawImage(drawingCanvas, 0, 0);
+
       requestAnimationFrame(renderLoop);
     }
 
