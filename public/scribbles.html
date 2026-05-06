@@ -121,10 +121,20 @@
       
       <div class="color-picker">
         <span style="color: #ccc; font-size: 12px;">Color:</span>
-        <div class="color-option active" style="background: white;" data-color="white"></div>
-        <div class="color-option" style="background: #48e6cf;" data-color="#48e6cf"></div>
-        <div class="color-option" style="background: #ffb14a;" data-color="#ffb14a"></div>
-        <div class="color-option" style="background: #ff6b7a;" data-color="#ff6b7a"></div>
+
+        <input
+          type="color"
+          id="colorWheel"
+          value="#ffffff"
+          style="
+            width: 36px;
+            height: 36px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            padding: 0;
+          "
+        >
       </div>
       
       <div class="separator"></div>
@@ -179,7 +189,7 @@
     const recordBtn = document.getElementById('recordBtn');
     const exportPdfBtn = document.getElementById('exportPdfBtn');
     const brushSizeInput = document.getElementById('brushSize');
-    const colorOptions = document.querySelectorAll('.color-option');
+    const colorWheel = document.getElementById('colorWheel'); 
     const recordCanvas = document.createElement('canvas');
     const recordCtx = recordCanvas.getContext('2d');
 
@@ -276,15 +286,10 @@
         state.brushSize = parseInt(e.target.value);
         ctx.lineWidth = state.brushSize;
       });
-      
-      colorOptions.forEach(option => {
-        option.addEventListener('click', () => {
-          colorOptions.forEach(o => o.classList.remove('active'));
-          option.classList.add('active');
-          state.color = option.dataset.color;
-          ctx.strokeStyle = state.color;
-          ctx.fillStyle = state.color;
-        });
+      colorWheel.addEventListener('input', (e) => {
+        state.color = e.target.value;
+        ctx.strokeStyle = state.color;
+        ctx.fillStyle = state.color;
       });
       
       toggleCameraBtn.addEventListener('click', async () => {
