@@ -136,7 +136,7 @@
       <button id="clearBtn">Clear</button>
       <button id="toggleCameraBtn">Camera Off</button>
       <button id="recordBtn">Record</button>
-      <button id="exportPdfBtn">Export PDF</button>
+      <button id="exportPdfBtn">Export PNG</button>
     </div>
   </div>
 
@@ -321,21 +321,53 @@
         const sec = s % 60;
         return `${m}:${sec.toString().padStart(2, '0')}`;
       }
-      exportPdfBtn.addEventListener('click', async () => {
-        const script = document.createElement('script');
-        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
-        script.onload = () => {
-          const canvas = drawingCanvas;
-          const imgData = canvas.toDataURL('image/png');
-          const pdf = new html2pdf.jsPDF({
-            orientation: 'portrait',
-            unit: 'px',
-            format: [canvas.width, canvas.height]
-          });
-          pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
-          pdf.save('drawing-' + Date.now() + '.pdf');
-        };
-        document.head.appendChild(script);
+      exportPdfBtn.addEventListener('click', () => {
+        const w = drawingCanvas.width;
+        const h = drawingCanvas.height;
+
+        const exportCanvas = document.createElement('canvas');
+        const exportCtx = exportCanvas.getContext('2d');
+
+        exportCanvas.width = w;
+        exportCanvas.height = h;
+
+        // black background
+        exportCtx.fillStyle = '#000';
+        exportCtx.fillRect(0, 0, w, h);
+
+        // draw camera if enabled
+        if (state.cameraEnabled && localVideo.readyState >= 2) {
+          const videoW = localVideo.videoWidth;
+          const videoH = localVideo.videoHeight;
+
+          const canvasAspect = w / h;
+          const videoAspect = videoW / videoH;
+
+          let drawW, drawH, offsetX, offsetY;
+
+          if (videoAspect > canvasAspect) {
+            drawW = w;
+            drawH = w / videoAspect;
+            offsetX = 0;
+            ffsetY = (h - drawH) / 2;
+          } else {
+            drawH = h;
+            drawW = h * videoAspect;
+            offsetX = (w - drawW) / 2;
+            offsetY = 0;
+          }
+
+          exportCtx.drawImage(localVideo, offsetX, offsetY, drawW, drawH);
+        }
+
+        // draw strokes (your drawing layer)
+        exportCtx.drawImage(drawingCanvas, 0, 0);
+
+        // download image
+        const link = document.createElement('a');
+        link.download = 'scribble-' + Date.now() + '.png';
+        link.href = exportCanvas.toDataURL('image/png');
+        link.click();
       });
       recordBtn.addEventListener('click', () => {
         if (state.isRecording) {
