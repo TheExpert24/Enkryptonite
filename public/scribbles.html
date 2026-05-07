@@ -19,7 +19,13 @@
     
     #remoteVideo { display: none; }
     
-    #localVideo { width: 100%; height: 100%; }
+    #localVideo {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
     
     #drawingCanvas {
       position: absolute;
@@ -173,15 +179,8 @@
     const remoteAudio = document.getElementById('remoteAudio');
     const localVideo = document.getElementById('localVideo');
     const drawingCanvas = document.getElementById('drawingCanvas');
-    const displayCanvas = document.createElement('canvas');
-    const displayCtx = displayCanvas.getContext('2d'); 
-    drawingCanvas.parentElement.appendChild(displayCanvas);
-    displayCanvas.style.position = 'absolute';
-    displayCanvas.style.top = '0';
-    displayCanvas.style.left = '0';
-    displayCanvas.style.zIndex = '5';   
     const ctx = drawingCanvas.getContext('2d');
-    
+    drawingCanvas.style.zIndex = '5';
     const brushBtn = document.getElementById('brushBtn');
     const eraserBtn = document.getElementById('eraserBtn');
     const clearBtn = document.getElementById('clearBtn');
@@ -189,7 +188,7 @@
     const recordBtn = document.getElementById('recordBtn');
     const exportPdfBtn = document.getElementById('exportPdfBtn');
     const brushSizeInput = document.getElementById('brushSize');
-    const colorWheel = document.getElementById('colorWheel'); 
+    const colorWheel = document.getElementById('colorWheel');
     const recordCanvas = document.createElement('canvas');
     const recordCtx = recordCanvas.getContext('2d');
 
@@ -218,6 +217,8 @@
       ctx.lineWidth = state.brushSize;
       
       window.addEventListener('resize', () => {
+        recordCanvas.width = drawingCanvas.width;
+        recordCanvas.height = drawingCanvas.height;
         drawingCanvas.width = container.offsetWidth || window.innerWidth;
         drawingCanvas.height = container.offsetHeight || window.innerHeight;
         ctx.strokeStyle = state.color;
@@ -228,10 +229,10 @@
         redrawCanvas();
       });
       
-      displayCanvas.addEventListener('mousedown', startDrawing, true);
-      displayCanvas.addEventListener('mousemove', draw, true);
-      displayCanvas.addEventListener('mouseup', stopDrawing, true);
-      displayCanvas.addEventListener('mouseout', stopDrawing, true);
+      drawingCanvas.addEventListener('mousedown', startDrawing, true);
+      drawingCanvas.addEventListener('mousemove', draw, true);
+      drawingCanvas.addEventListener('mouseup', stopDrawing, true);
+      drawingCanvas.addEventListener('mouseout', stopDrawing, true);
       
       // Retry canvas sizing after a delay to ensure container is ready
       setTimeout(() => {
@@ -243,7 +244,8 @@
         ctx.lineJoin = 'round';
         ctx.lineWidth = state.brushSize;
       }, 500);
-      
+      recordCanvas.width = drawingCanvas.width;
+      recordCanvas.height = drawingCanvas.height;
       drawingCanvas.addEventListener('touchstart', (e) => {
         e.preventDefault();
         const touch = e.touches[0];
@@ -294,12 +296,34 @@
       
       toggleCameraBtn.addEventListener('click', async () => {
         state.cameraEnabled = !state.cameraEnabled;
+
         if (state.cameraEnabled) {
-          localVideo.style.display = 'block';
           toggleCameraBtn.textContent = 'Camera Off';
+          localVideo.style.display = 'block';
+
+          // restart camera pipeline if needed
+          if (camera) {
+            try {
+              await camera.start();
+            } catch (e) {
+              console.log('camera already running');
+            }
+          }
+
         } else {
-          localVideo.style.display = 'none';
           toggleCameraBtn.textContent = 'Camera On';
+          localVideo.style.display = 'none';
+
+            // stop MediaPipe camera loop (IMPORTANT)
+            if (camera && camera.stop) {
+              camera.stop();
+            }
+
+          // clear last frame so it doesn't "freeze ghost image"
+          const w = drawingCanvas.width;
+          const h = drawingCanvas.height;
+          ctx.clearRect(0, 0, w, h);
+          redrawCanvas();
         }
       });
       
@@ -390,7 +414,7 @@
           }
           state.recordingChunks = [];
 
-          const stream = displayCanvas.captureStream(30);
+          const stream = recordCanvas.captureStream(120);
 
         // add audio
           if (state.cameraEnabled && state.localStream) {
@@ -400,7 +424,8 @@
         }
 
         state.mediaRecorder = new MediaRecorder(stream, {
-          mimeType: 'video/webm'
+          mimeType: 'video/webm;codecs=vp9',
+          videoBitsPerSecond: 12000000
         });
 
         state.mediaRecorder.ondataavailable = (e) => {
@@ -486,7 +511,6 @@
           document.body.appendChild(overlay);
         };
         state.isRecording = true;
-        drawRecordingFrame();
         state.mediaRecorder.start();
 
         recordBtn.textContent = 'Stop';
@@ -507,17 +531,13 @@
       ctx.lineWidth = state.brushSize;
       redrawCanvas();
     }
-    function drawRecordingFrame() {
-      if (!state.isRecording) return;
-
-      const w = drawingCanvas.width;
-      const h = drawingCanvas.height;
-
-      if (recordCanvas.width !== w) recordCanvas.width = w;
-      if (recordCanvas.height !== h) recordCanvas.height = h;
+    function renderRecordingFrame() {
+      const w = recordCanvas.width;
+      const h = recordCanvas.height;
 
       recordCtx.clearRect(0, 0, w, h);
 
+      // draw camera first
       if (state.cameraEnabled && localVideo.readyState >= 2) {
         const videoW = localVideo.videoWidth;
         const videoH = localVideo.videoHeight;
@@ -528,23 +548,24 @@
         let drawW, drawH, offsetX, offsetY;
 
         if (videoAspect > canvasAspect) {
-          drawW = w;
-          drawH = w / videoAspect;
-          offsetX = 0;
-          offsetY = (h - drawH) / 2;
-        } else {
           drawH = h;
           drawW = h * videoAspect;
           offsetX = (w - drawW) / 2;
           offsetY = 0;
+        } else {
+          drawW = w;
+          drawH = w / videoAspect;
+          offsetX = 0;
+          offsetY = (h - drawH) / 2;
         }
 
         recordCtx.drawImage(localVideo, offsetX, offsetY, drawW, drawH);
       }
-      recordCtx.drawImage(drawingCanvas, 0, 0);
 
-      requestAnimationFrame(drawRecordingFrame);
+      // draw strokes on top
+      recordCtx.drawImage(drawingCanvas, 0, 0);
     }
+    
     function startFaceDetectionLoop() {
       if (detectingFace) return;
       detectingFace = true;
@@ -663,9 +684,8 @@
         }));
       }
     }
-
     function getCanvasPoint(e) {
-      const rect = displayCanvas.getBoundingClientRect();
+      const rect = drawingCanvas.getBoundingClientRect();
       return { x: e.clientX - rect.left, y: e.clientY - rect.top };
     }
 
@@ -968,34 +988,45 @@
       const w = drawingCanvas.width;
       const h = drawingCanvas.height;
 
-      if (displayCanvas.width !== w) displayCanvas.width = w;
-      if (displayCanvas.height !== h) displayCanvas.height = h;
-
-      displayCtx.clearRect(0, 0, w, h);
-
-      // draw video EXACTLY as shown
-      if (state.cameraEnabled && localVideo.readyState >= 2) {
-        const videoRect = localVideo.getBoundingClientRect();
-        const canvasRect = displayCanvas.getBoundingClientRect();
-
-        const scaleX = canvasRect.width / videoRect.width;
-        const scaleY = canvasRect.height / videoRect.height;
-
-        displayCtx.drawImage(
-          localVideo,
-          0,
-          0,
-          videoRect.width * scaleX,
-          videoRect.height * scaleY
-        );
+      // black background if camera off
+      if (!state.cameraEnabled) {
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, w, h);
       }
 
-      // draw your strokes
-      redrawCanvas(); // draws into drawingCanvas
-      displayCtx.drawImage(drawingCanvas, 0, 0);
+      // draw camera properly fitted
+      if (state.cameraEnabled && localVideo.readyState >= 2) {
+        const videoW = localVideo.videoWidth;
+        const videoH = localVideo.videoHeight;
 
+        const canvasAspect = w / h;
+        const videoAspect = videoW / videoH;
+
+        let drawW, drawH, offsetX, offsetY;
+
+        if (videoAspect > canvasAspect) {
+          drawH = h;
+          drawW = h * videoAspect;
+          offsetX = (w - drawW) / 2;
+          offsetY = 0;
+        } else {
+          drawW = w;
+          drawH = w / videoAspect;
+          offsetX = 0;
+          offsetY = (h - drawH) / 2;
+        }
+
+        ctx.drawImage(localVideo, offsetX, offsetY, drawW, drawH);
+      }
+
+      // draw strokes
+      
+
+      ctx.globalCompositeOperation = 'source-over';
+      redrawCanvas();
       requestAnimationFrame(renderLoop);
-    }
+      renderRecordingFrame();
+    }   
 
     renderLoop();
 
